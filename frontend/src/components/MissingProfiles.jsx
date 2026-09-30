@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { Search, Plus, Trash2, Calendar, MapPin, Mail, Upload, X, AlertCircle } from 'lucide-react';
-import { getProfiles, createProfile, deleteProfile, getFullImageUrl } from '../services/api';
+import { Search, Plus, Trash2, Calendar, MapPin, Mail, Upload, X, AlertCircle, UserCheck } from 'lucide-react';
+import { getProfiles, createProfile, deleteProfile, registerBody, getFullImageUrl } from '../services/api';
 
 export default function MissingProfiles({ user, onRequireLogin }) {
   const [profiles, setProfiles] = useState([]);
@@ -17,6 +17,13 @@ export default function MissingProfiles({ user, onRequireLogin }) {
   const [selectedFile, setSelectedFile] = useState(null);
   const [previewUrl, setPreviewUrl] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Body Re-ID Modal State
+  const [isBodyModalOpen, setIsBodyModalOpen] = useState(false);
+  const [bodyTargetProfile, setBodyTargetProfile] = useState(null);
+  const [bodyFile, setBodyFile] = useState(null);
+  const [bodyPreviewUrl, setBodyPreviewUrl] = useState('');
+  const [isRegisteringBody, setIsRegisteringBody] = useState(false);
 
   // Tải danh sách hồ sơ
   const loadProfiles = async () => {
@@ -103,6 +110,47 @@ export default function MissingProfiles({ user, onRequireLogin }) {
     }
   };
 
+  // Mở modal đăng ký thêm ảnh Body Re-ID
+  const handleOpenBodyModal = (profile) => {
+    if (!user) {
+      onRequireLogin();
+      return;
+    }
+    setBodyTargetProfile(profile);
+    setBodyFile(null);
+    setBodyPreviewUrl('');
+    setIsBodyModalOpen(true);
+  };
+
+  const handleBodyFileChange = (e) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      setBodyFile(file);
+      setBodyPreviewUrl(URL.createObjectURL(file));
+    }
+  };
+
+  const handleRegisterBodySubmit = async (e) => {
+    e.preventDefault();
+    if (!bodyFile || !bodyTargetProfile) {
+      alert('Vui lòng chọn ảnh toàn thân');
+      return;
+    }
+    setIsRegisteringBody(true);
+    try {
+      await registerBody(bodyTargetProfile.id, bodyFile);
+      alert(`Đã đăng ký đặc trưng thân hình (Body Re-ID) thành công cho "${bodyTargetProfile.hoTen}"!`);
+      setIsBodyModalOpen(false);
+      setBodyTargetProfile(null);
+      setBodyFile(null);
+      setBodyPreviewUrl('');
+    } catch (err) {
+      alert('Lỗi đăng ký đặc trưng thân hình: ' + err.message);
+    } finally {
+      setIsRegisteringBody(false);
+    }
+  };
+
   return (
     <div className="profiles-container">
       {/* Thanh công cụ tìm kiếm và nút Thêm mới */}
@@ -171,12 +219,20 @@ export default function MissingProfiles({ user, onRequireLogin }) {
                   </div>
                 </div>
 
-                <div className="profile-actions">
+                <div className="profile-actions flex gap-2">
                   <button
-                    className="btn btn-danger btn-sm w-full"
-                    onClick={() => handleDelete(p.id, p.hoTen)}
+                    className="btn btn-outline btn-sm flex-1"
+                    onClick={() => handleOpenBodyModal(p)}
+                    title="Đăng ký thêm ảnh toàn thân để nhận diện Re-ID dáng người"
                   >
-                    <Trash2 size={14} /> Xoá hồ sơ
+                    <UserCheck size={14} /> Thêm ảnh Body
+                  </button>
+                  <button
+                    className="btn btn-danger btn-sm"
+                    onClick={() => handleDelete(p.id, p.hoTen)}
+                    title="Xoá hồ sơ"
+                  >
+                    <Trash2 size={14} />
                   </button>
                 </div>
               </div>
@@ -285,6 +341,69 @@ export default function MissingProfiles({ user, onRequireLogin }) {
                   disabled={isSubmitting}
                 >
                   {isSubmitting ? 'Đang trích xuất vector & lưu...' : 'Lưu hồ sơ'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Đăng Ký Đặc Trưng Thân Hình (Body Re-ID) */}
+      {isBodyModalOpen && (
+        <div className="modal-overlay">
+          <div className="modal-content glass-panel">
+            <div className="modal-header">
+              <h3 className="modal-title">
+                Đăng Ký Ảnh Toàn Thân (Body Re-ID) - {bodyTargetProfile?.hoTen}
+              </h3>
+              <button className="modal-close" onClick={() => setIsBodyModalOpen(false)}>
+                <X size={20} />
+              </button>
+            </div>
+
+            <form onSubmit={handleRegisterBodySubmit} className="modal-body">
+              <div className="form-group">
+                <p className="text-sm text-muted mb-2">
+                  Tải lên ảnh chụp toàn thân (từ đầu đến chân) của <strong>{bodyTargetProfile?.hoTen}</strong> (FAISS #{bodyTargetProfile?.vectorIdFaiss}). Mô hình ResNet-50 CUHK03 sẽ trích xuất vector đặc trưng 2048 chiều lưu vào FAISS Body Index để hỗ trợ nhận diện bổ trợ khi không thấy rõ mặt.
+                </p>
+                <label className="form-label">Ảnh toàn thân: *</label>
+                <div
+                  className="upload-dropzone"
+                  onClick={() => document.getElementById('bodyInput')?.click()}
+                >
+                  {bodyPreviewUrl ? (
+                    <img src={bodyPreviewUrl} alt="Body Preview" className="preview-img" />
+                  ) : (
+                    <div className="dropzone-placeholder">
+                      <Upload size={32} className="text-muted mb-2" />
+                      <p className="font-semibold">Bấm để chọn ảnh toàn thân</p>
+                      <p className="text-xs text-muted">Hỗ trợ JPG, PNG (rõ vóc dáng, trang phục)</p>
+                    </div>
+                  )}
+                  <input
+                    id="bodyInput"
+                    type="file"
+                    accept="image/*"
+                    style={{ display: 'none' }}
+                    onChange={handleBodyFileChange}
+                  />
+                </div>
+              </div>
+
+              <div className="modal-footer">
+                <button
+                  type="button"
+                  className="btn btn-outline"
+                  onClick={() => setIsBodyModalOpen(false)}
+                >
+                  Huỷ bỏ
+                </button>
+                <button
+                  type="submit"
+                  className="btn btn-primary"
+                  disabled={isRegisteringBody || !bodyFile}
+                >
+                  {isRegisteringBody ? 'Đang trích xuất vector thân hình...' : 'Lưu đặc trưng Body'}
                 </button>
               </div>
             </form>

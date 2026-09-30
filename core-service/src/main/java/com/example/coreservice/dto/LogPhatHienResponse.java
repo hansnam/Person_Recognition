@@ -12,6 +12,10 @@ public class LogPhatHienResponse {
     private String lienHeNguoiThan;
     private LocalDateTime thoiGian;
     private Float doTinCay;
+    private Float faceSimilarity;
+    private Float bodySimilarity;
+    private String fusionStatus;
+    private Boolean bodyWarning;
     private String anhChupUrl;
 
     public LogPhatHienResponse() {
@@ -28,6 +32,10 @@ public class LogPhatHienResponse {
         }
         dto.setThoiGian(entity.getThoiGian());
         dto.setDoTinCay(entity.getDoTinCay());
+        dto.setFaceSimilarity(entity.getFaceSimilarity());
+        dto.setBodySimilarity(entity.getBodySimilarity());
+        dto.setFusionStatus(entity.getFusionStatus());
+        dto.setBodyWarning(entity.getBodyWarning());
         dto.setAnhChupUrl(entity.getAnhChupUrl());
         return dto;
     }
@@ -78,6 +86,38 @@ public class LogPhatHienResponse {
 
     public void setDoTinCay(Float doTinCay) {
         this.doTinCay = doTinCay;
+    }
+
+    public Float getFaceSimilarity() {
+        return faceSimilarity;
+    }
+
+    public void setFaceSimilarity(Float faceSimilarity) {
+        this.faceSimilarity = faceSimilarity;
+    }
+
+    public Float getBodySimilarity() {
+        return bodySimilarity;
+    }
+
+    public void setBodySimilarity(Float bodySimilarity) {
+        this.bodySimilarity = bodySimilarity;
+    }
+
+    public String getFusionStatus() {
+        return fusionStatus;
+    }
+
+    public void setFusionStatus(String fusionStatus) {
+        this.fusionStatus = fusionStatus;
+    }
+
+    public Boolean getBodyWarning() {
+        return bodyWarning;
+    }
+
+    public void setBodyWarning(Boolean bodyWarning) {
+        this.bodyWarning = bodyWarning;
     }
 
     public String getAnhChupUrl() {

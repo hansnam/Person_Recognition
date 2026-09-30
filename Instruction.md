@@ -1,4 +1,27 @@
-# HƯỚNG DẪN KHỞI CHẠY HỆ THỐNG NHẬN DIỆN NGƯỜI MẤT TÍCH
+# HƯỚNG DẪN KHỞI CHẠY & VẬN HÀNH HỆ THỐNG FINDME AI
+## Hệ Thống Thông Báo Phát Hiện Người Mất Tích Bằng AI Đa Phương Thức (Face & Body Re-ID)
+
+---
+
+## 📌 Tổng Quan Về Hệ Thống (System Overview)
+
+Hệ thống **FINDME AI** là giải pháp giám sát và tìm kiếm người mất tích tự động, ứng dụng thị giác máy tính (Computer Vision) và học sâu (Deep Learning) kết hợp sinh trắc học đa phương thức (**Multimodal Biometrics: Face Recognition + Body Person Re-Identification**) theo thời gian thực nhằm hỗ trợ gia đình và lực lượng chức năng phát hiện người mất tích qua camera an ninh hoặc ảnh chụp hiện trường.
+
+### 🌟 Các Tính Năng Trọng Tâm:
+1. **Quản trị hồ sơ người mất tích:** Khai báo thông tin cá nhân, khu vực mất tích, thông tin liên hệ gia đình; tự động trích xuất và đồng bộ cả vector đặc trưng khuôn mặt (Face) và dáng người/trang phục (Body Re-ID) vào cơ sở dữ liệu vector FAISS.
+2. **Nhận diện đa phương thức thời gian thực (Multimodal Real-time Fusion):**
+   - **Khuôn mặt (Face Recognition):** Phát hiện qua YOLOv8n-Face $\rightarrow$ Căn chỉnh 5 điểm mốc ArcFace (112×112) $\rightarrow$ Trích xuất vector 512 chiều bằng MobileFaceNet.
+   - **Trang phục & Dáng người (Body Person Re-ID):** Phát hiện qua YOLOv8n $\rightarrow$ Căn chuẩn kích thước 256×128 RGB $\rightarrow$ Trích xuất vector 2048 chiều bằng ResNet-50 CUHK03 (BNNeck).
+   - **Cơ chế Hợp nhất (Fusion Engine):** Liên kết Face - Body bằng kiểm tra hình học bao hàm (Containment Check), suy luận trạng thái kết hợp theo nguyên tắc **Ưu tiên Khuôn mặt (Face-Priority & Body-Assist)**.
+3. **Cảnh báo khẩn cấp tức thì (Emergency Alert):** Kích hoạt âm thanh cảnh báo trực tiếp trên giao diện giám sát, hiển thị banner khẩn cấp đối soát ảnh thực tế và tự động gửi email thông báo kèm ảnh bằng chứng tới người thân.
+4. **Lưu trữ & Truy vết lịch sử (Audit Log):** Ghi nhận chi tiết nhật ký các sự kiện nhận diện (thời gian, hình ảnh chụp, `face_similarity`, `body_similarity`, `fusion_status`, `body_warning`).
+
+> 📖 **XEM CHI TIẾT TẠI:** **[ARCHITECTURE.md](ARCHITECTURE.md)**  
+> *(Tài liệu chứa toàn bộ sơ đồ kiến trúc vi dịch vụ, luồng xử lý chi tiết Face/Body/Fusion, mô hình dữ liệu MySQL, FAISS index, và tài liệu các REST API endpoints).*
+
+---
+
+## 🏗️ Kiến Trúc Hệ Thống (System Architecture)
 
 Hệ thống được thiết kế theo kiến trúc **Microservices** phân tán gồm 3 thành phần chính và cơ sở dữ liệu MySQL:
 
@@ -54,7 +77,7 @@ Hệ thống được thiết kế theo kiến trúc **Microservices** phân tá
 Mở **Terminal 1**:
 ```powershell
 # Di chuyển vào thư mục ML Service
-cd c:\CODE\face\ml-service
+cd ml-service
 
 # Kích hoạt môi trường ảo Python đã cài sẵn thư viện
 .\venv\Scripts\activate
@@ -75,7 +98,7 @@ python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 Mở **Terminal 2**:
 ```powershell
 # Di chuyển vào thư mục Core Service
-cd c:\CODE\face\core-service
+cd core-service
 
 # Chạy Spring Boot bằng Maven Wrapper
 .\mvnw.cmd spring-boot:run
@@ -93,7 +116,7 @@ cd c:\CODE\face\core-service
 Mở **Terminal 3**:
 ```powershell
 # Di chuyển vào thư mục Frontend
-cd c:\CODE\face\frontend
+cd frontend
 
 # Cài đặt dependency (nếu lần đầu chạy)
 npm install

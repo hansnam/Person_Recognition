@@ -54,6 +54,13 @@ public class NguoiMatTichService {
             MlRegisterResponse mlResponse = mlServiceClient.registerFace(file, null);
             Long vectorId = mlResponse.getVectorId();
 
+            // 2b. Tự động trích xuất và đăng ký đặc trưng thân hình (Body Re-ID) với cùng vectorId vào FAISS
+            try {
+                mlServiceClient.registerBody(file, vectorId);
+            } catch (Exception e) {
+                System.err.println("[Body Re-ID] Không thể tự động trích xuất dáng người cho hồ sơ #" + vectorId + ": " + e.getMessage());
+            }
+
             // 3. Tạo entity và lưu vào MySQL
             NguoiMatTich entity = new NguoiMatTich();
             entity.setHoTen(request.getHoTen());
@@ -116,12 +123,28 @@ public class NguoiMatTichService {
             // Lưu ảnh mới
             String newImageUrl = fileStorageService.storeFile(newFile);
 
-            // Xoá vector cũ trên FAISS
-            mlServiceClient.deleteFace(entity.getVectorIdFaiss());
+            // Xoá vector cũ trên FAISS (cả Face và Body)
+            try {
+                mlServiceClient.deleteFace(entity.getVectorIdFaiss());
+            } catch (Exception e) {
+                System.err.println("[Cảnh báo] Lỗi khi xoá vector face cũ: " + e.getMessage());
+            }
+            try {
+                mlServiceClient.deleteBody(entity.getVectorIdFaiss());
+            } catch (Exception e) {
+                System.err.println("[Cảnh báo] Lỗi khi xoá vector body cũ: " + e.getMessage());
+            }
 
             // Đăng ký vector mới trên FAISS
             MlRegisterResponse mlResponse = mlServiceClient.registerFace(newFile, null);
             entity.setVectorIdFaiss(mlResponse.getVectorId());
+
+            // Tự động đăng ký lại đặc trưng thân hình (Body Re-ID) với ID mới
+            try {
+                mlServiceClient.registerBody(newFile, mlResponse.getVectorId());
+            } catch (Exception e) {
+                System.err.println("[Body Re-ID] Không thể tự động trích xuất dáng người khi cập nhật #" + mlResponse.getVectorId() + ": " + e.getMessage());
+            }
 
             // Xoá ảnh cũ
             fileStorageService.deleteFile(entity.getAnhDaiDienUrl());
@@ -144,12 +167,16 @@ public class NguoiMatTichService {
         NguoiMatTich entity = nguoiMatTichRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("Không tìm thấy hồ sơ người mất tích có id=" + id));
 
-        // 1. Xoá vector trong FAISS
+        // 1. Xoá vector trong FAISS (Face & Body)
         try {
             mlServiceClient.deleteFace(entity.getVectorIdFaiss());
         } catch (Exception e) {
-            // Log cảnh báo nhưng vẫn tiếp tục xoá dữ liệu trong MySQL
-            System.err.println("[Cảnh báo] Lỗi khi xoá vector trong FAISS: " + e.getMessage());
+            System.err.println("[Cảnh báo] Lỗi khi xoá vector face trong FAISS: " + e.getMessage());
+        }
+        try {
+            mlServiceClient.deleteBody(entity.getVectorIdFaiss());
+        } catch (Exception e) {
+            System.err.println("[Cảnh báo] Lỗi khi xoá vector body trong FAISS: " + e.getMessage());
         }
 
         // 2. Xoá toàn bộ log phát hiện liên kết
@@ -161,5 +188,21 @@ public class NguoiMatTichService {
 
         // 4. Xoá hồ sơ trong MySQL
         nguoiMatTichRepository.delete(entity);
+    }
+
+    /**
+     * Đăng ký đặc trưng cơ thể (Body Re-ID) cho hồ sơ người mất tích
+     */
+    @Transactional
+    public void registerBody(Long id, MultipartFile file) {
+        if (file == null || file.isEmpty()) {
+            throw new IllegalArgumentException("Ảnh toàn thân không được để trống.");
+        }
+
+        NguoiMatTich entity = nguoiMatTichRepository.findById(id)
+                .orElseThrow(() -> new ResourceNotFoundException("Không tìm thấy hồ sơ người mất tích có id=" + id));
+
+        // Đăng ký đặc trưng cơ thể vào Body FAISS với cùng vectorIdFaiss của Face
+        mlServiceClient.registerBody(file, entity.getVectorIdFaiss());
     }
 }

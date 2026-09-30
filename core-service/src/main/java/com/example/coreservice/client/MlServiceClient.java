@@ -187,4 +187,150 @@ public class MlServiceClient {
             throw new MlServiceException("Không thể kết nối tới ML Service (FastAPI) để xử lý video: " + e.getMessage(), e);
         }
     }
+
+    /**
+     * Gọi POST /ml/register-body để đăng ký đặc trưng cơ thể vào Body FAISS
+     */
+    public void registerBody(MultipartFile file, Long vectorId) {
+        try {
+            MultiValueMap<String, Object> body = new LinkedMultiValueMap<>();
+            ByteArrayResource resource = new ByteArrayResource(file.getBytes()) {
+                @Override
+                public String getFilename() {
+                    return file.getOriginalFilename() != null ? file.getOriginalFilename() : "body.jpg";
+                }
+            };
+            body.add("file", resource);
+            if (vectorId != null) {
+                body.add("vector_id", vectorId);
+            }
+
+            restClient.post()
+                    .uri("/ml/register-body")
+                    .contentType(MediaType.MULTIPART_FORM_DATA)
+                    .body(body)
+                    .retrieve()
+                    .onStatus(HttpStatusCode::isError, (req, resp) -> {
+                        String errorBody = new String(resp.getBody().readAllBytes());
+                        throw new MlServiceException("Lỗi từ ML Service khi đăng ký body (" + resp.getStatusCode() + "): " + errorBody, resp.getStatusCode().value());
+                    })
+                    .toBodilessEntity();
+
+        } catch (IOException e) {
+            throw new MlServiceException("Lỗi đọc dữ liệu ảnh body khi gửi tới ML Service: " + e.getMessage(), e);
+        } catch (MlServiceException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new MlServiceException("Không thể kết nối tới ML Service khi đăng ký body: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Gọi DELETE /ml/body/{vector_id} để xoá vector body khỏi Body FAISS
+     */
+    public void deleteBody(Long vectorId) {
+        try {
+            restClient.delete()
+                    .uri("/ml/body/{vector_id}", vectorId)
+                    .retrieve()
+                    .onStatus(HttpStatusCode::isError, (req, resp) -> {
+                        // Bỏ qua lỗi 404 nếu hồ sơ chưa đăng ký body
+                        if (resp.getStatusCode().value() != 404) {
+                            String errorBody = new String(resp.getBody().readAllBytes());
+                            throw new MlServiceException("Lỗi khi xoá vector body (" + resp.getStatusCode() + "): " + errorBody, resp.getStatusCode().value());
+                        }
+                    })
+                    .toBodilessEntity();
+        } catch (MlServiceException e) {
+            throw e;
+        } catch (Exception e) {
+            // Không chặn tiến trình nếu xoá body thất bại
+            System.err.println("[MlServiceClient] Không thể xoá vector body id=" + vectorId + ": " + e.getMessage());
+        }
+    }
+
+    /**
+     * Gọi POST /ml/detect-and-match-fusion để nhận diện Fusion (Face + Body Re-ID)
+     */
+    public com.example.coreservice.dto.MlFusionResponse detectAndMatchFusion(MultipartFile file, Double faceThreshold, Double bodyThreshold) {
+        try {
+            MultiValueMap<String, Object> body = new LinkedMultiValueMap<>();
+            ByteArrayResource resource = new ByteArrayResource(file.getBytes()) {
+                @Override
+                public String getFilename() {
+                    return file.getOriginalFilename() != null ? file.getOriginalFilename() : "fusion_detect.jpg";
+                }
+            };
+            body.add("file", resource);
+
+            double finalFaceThresh = faceThreshold != null ? faceThreshold : 0.45;
+            double finalBodyThresh = bodyThreshold != null ? bodyThreshold : 0.65;
+
+            return restClient.post()
+                    .uri(uriBuilder -> uriBuilder
+                            .path("/ml/detect-and-match-fusion")
+                            .queryParam("face_threshold", finalFaceThresh)
+                            .queryParam("body_threshold", finalBodyThresh)
+                            .build())
+                    .contentType(MediaType.MULTIPART_FORM_DATA)
+                    .body(body)
+                    .retrieve()
+                    .onStatus(HttpStatusCode::isError, (req, resp) -> {
+                        String errorBody = new String(resp.getBody().readAllBytes());
+                        throw new MlServiceException("Lỗi từ ML Service (Fusion) (" + resp.getStatusCode() + "): " + errorBody, resp.getStatusCode().value());
+                    })
+                    .body(com.example.coreservice.dto.MlFusionResponse.class);
+
+        } catch (IOException e) {
+            throw new MlServiceException("Lỗi đọc dữ liệu ảnh khi gửi tới ML Service Fusion: " + e.getMessage(), e);
+        } catch (MlServiceException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new MlServiceException("Không thể kết nối tới ML Service (Fusion): " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Gọi POST /ml/detect-and-match-fusion-video để nhận diện Fusion từ file video
+     */
+    public com.example.coreservice.dto.MlFusionVideoResponse detectAndMatchFusionVideo(MultipartFile file, Double faceThreshold, Double bodyThreshold, Double frameIntervalSeconds) {
+        try {
+            MultiValueMap<String, Object> body = new LinkedMultiValueMap<>();
+            ByteArrayResource resource = new ByteArrayResource(file.getBytes()) {
+                @Override
+                public String getFilename() {
+                    return file.getOriginalFilename() != null ? file.getOriginalFilename() : "fusion_video.mp4";
+                }
+            };
+            body.add("file", resource);
+
+            double finalFaceThresh = faceThreshold != null ? faceThreshold : 0.45;
+            double finalBodyThresh = bodyThreshold != null ? bodyThreshold : 0.65;
+            double finalInterval = frameIntervalSeconds != null ? frameIntervalSeconds : 1.0;
+
+            return videoRestClient.post()
+                    .uri(uriBuilder -> uriBuilder
+                            .path("/ml/detect-and-match-fusion-video")
+                            .queryParam("face_threshold", finalFaceThresh)
+                            .queryParam("body_threshold", finalBodyThresh)
+                            .queryParam("frame_interval_seconds", finalInterval)
+                            .build())
+                    .contentType(MediaType.MULTIPART_FORM_DATA)
+                    .body(body)
+                    .retrieve()
+                    .onStatus(HttpStatusCode::isError, (req, resp) -> {
+                        String errorBody = new String(resp.getBody().readAllBytes());
+                        throw new MlServiceException("Lỗi từ ML Service khi phân tích fusion video (" + resp.getStatusCode() + "): " + errorBody, resp.getStatusCode().value());
+                    })
+                    .body(com.example.coreservice.dto.MlFusionVideoResponse.class);
+
+        } catch (IOException e) {
+            throw new MlServiceException("Lỗi đọc dữ liệu video khi gửi tới ML Service Fusion: " + e.getMessage(), e);
+        } catch (MlServiceException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new MlServiceException("Không thể kết nối tới ML Service Fusion Video: " + e.getMessage(), e);
+        }
+    }
 }
+

@@ -422,6 +422,16 @@
   border: 1px solid rgba(239, 68, 68, 0.3);
 }
 
+.face-list-item.item-warning {
+  background: rgba(249, 115, 22, 0.08);
+  border: 1px solid rgba(249, 115, 22, 0.35);
+}
+
+.face-list-item.item-candidate {
+  background: rgba(59, 130, 246, 0.06);
+  border: 1px solid rgba(59, 130, 246, 0.25);
+}
+
 .face-list-item.item-unmatched {
   background: rgba(6, 182, 212, 0.05);
   border: 1px solid rgba(6, 182, 212, 0.2);
@@ -445,10 +455,30 @@
   color: #ffffff;
 }
 
+.face-status-tag.tag-warning {
+  background: #ea580c;
+  color: #ffffff;
+}
+
+.face-status-tag.tag-face {
+  background: #2563eb;
+  color: #ffffff;
+}
+
+.face-status-tag.tag-body {
+  background: #0891b2;
+  color: #ffffff;
+}
+
 .face-status-tag.tag-unmatched {
   background: rgba(6, 182, 212, 0.2);
   color: #38bdf8;
   border: 1px solid rgba(6, 182, 212, 0.3);
+}
+
+.banner-warning-mismatch {
+  border-color: rgba(249, 115, 22, 0.6) !important;
+  background: linear-gradient(135deg, rgba(30, 15, 5, 0.95), rgba(40, 20, 10, 0.95)) !important;
 }
 
 .face-sim-value {

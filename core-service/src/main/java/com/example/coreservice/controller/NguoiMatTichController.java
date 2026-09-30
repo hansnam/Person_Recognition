@@ -64,6 +64,20 @@ public class NguoiMatTichController {
     }
 
     /**
+     * Đăng ký đặc trưng toàn thân / dáng người (Body Re-ID) cho hồ sơ
+     */
+    @PostMapping(value = "/{id}/register-body", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public ResponseEntity<Map<String, Object>> registerBody(
+            @PathVariable Long id,
+            @RequestParam("file") MultipartFile file) {
+        nguoiMatTichService.registerBody(id, file);
+        return ResponseEntity.ok(Map.of(
+                "success", true,
+                "message", "Đăng ký đặc trưng cơ thể thành công cho hồ sơ id=" + id
+        ));
+    }
+
+    /**
      * Xoá hồ sơ người mất tích (đồng bộ xoá vector trong FAISS và MySQL)
      */
     @DeleteMapping("/{id}")

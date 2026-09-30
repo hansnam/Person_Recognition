@@ -19,7 +19,7 @@ import {
   Radio,
   Scan
 } from 'lucide-react';
-import { detectFace, detectVideo, getFullImageUrl } from '../services/api';
+import { detectFace, detectVideo, detectFusion, detectFusionVideo, getFullImageUrl } from '../services/api';
 
 export default function CameraMonitor({ onNewAlert }) {
   const videoRef = useRef(null);
@@ -33,6 +33,14 @@ export default function CameraMonitor({ onNewAlert }) {
   const liveScanInProgressRef = useRef(false);
   const lastAlertTimeRef = useRef(0);
   const staticImageRef = useRef(null);
+  const captureCanvasRef = useRef(null);
+  const isAutoScanRef = useRef(false);
+  const isCameraActiveRef = useRef(false);
+  const isProcessingRef = useRef(false);
+  const frameCountRef = useRef(0);
+  const lastFpsTimeRef = useRef(Date.now());
+  const autoScanLoopTimeoutRef = useRef(null);
+  const lastValidDetectionsRef = useRef({ detections: [], timestamp: 0 });
 
   // Chế độ giám sát: 'webcam' | 'image' | 'video'
   const [monitorMode, setMonitorMode] = useState('webcam');
@@ -41,8 +49,11 @@ export default function CameraMonitor({ onNewAlert }) {
   const [isCameraActive, setIsCameraActive] = useState(false);
   const [isAutoScan, setIsAutoScan] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [streamFps, setStreamFps] = useState(0);
+  const [streamLatency, setStreamLatency] = useState(0);
   const [stream, setStream] = useState(null);
   const [threshold, setThreshold] = useState(0.45);
+  const [bodyThreshold, setBodyThreshold] = useState(0.65);
   const [lastResult, setLastResult] = useState(null);
   const [alertData, setAlertData] = useState(null);
   const [errorMessage, setErrorMessage] = useState('');
@@ -144,6 +155,10 @@ export default function CameraMonitor({ onNewAlert }) {
 
   // Dừng Camera
   const stopCamera = () => {
+    if (autoScanLoopTimeoutRef.current) {
+      clearTimeout(autoScanLoopTimeoutRef.current);
+      autoScanLoopTimeoutRef.current = null;
+    }
     if (stream) {
       stream.getTracks().forEach((track) => track.stop());
       setStream(null);
@@ -151,8 +166,14 @@ export default function CameraMonitor({ onNewAlert }) {
     if (videoRef.current) {
       videoRef.current.srcObject = null;
     }
+    isCameraActiveRef.current = false;
+    isAutoScanRef.current = false;
+    isProcessingRef.current = false;
     setIsCameraActive(false);
     setIsAutoScan(false);
+    setStreamFps(0);
+    setStreamLatency(0);
+    lastValidDetectionsRef.current = { detections: [], timestamp: 0 };
     clearCanvas();
   };
 
@@ -175,50 +196,137 @@ export default function CameraMonitor({ onNewAlert }) {
       const ctx = canvas.getContext('2d');
       ctx.clearRect(0, 0, canvas.width, canvas.height);
     }
+    lastValidDetectionsRef.current = { detections: [], timestamp: 0 };
   };
 
-  // Chụp khung hình từ webcam và gửi nhận diện
-  const captureAndDetect = async () => {
-    if (!videoRef.current || isProcessing) return;
+  // Chụp khung hình từ webcam và gửi nhận diện (Downscale tối đa 640px để đạt ~3-5 FPS mượt mà)
+  const captureAndDetect = () => {
+    return new Promise((resolve) => {
+      if (!videoRef.current || isProcessingRef.current) {
+        resolve();
+        return;
+      }
 
-    const video = videoRef.current;
-    if (video.videoWidth === 0 || video.videoHeight === 0) return;
+      const video = videoRef.current;
+      if (video.videoWidth === 0 || video.videoHeight === 0) {
+        resolve();
+        return;
+      }
 
-    const canvas = canvasRef.current;
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    const ctx = canvas.getContext('2d');
+      const origW = video.videoWidth;
+      const origH = video.videoHeight;
+      const MAX_DIM = 640;
+      let targetW = origW;
+      let targetH = origH;
 
-    // Chụp khung hình hiện tại
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      if (Math.max(origW, origH) > MAX_DIM) {
+        if (origW >= origH) {
+          targetW = MAX_DIM;
+          targetH = Math.round((origH * MAX_DIM) / origW);
+        } else {
+          targetH = MAX_DIM;
+          targetW = Math.round((origW * MAX_DIM) / origH);
+        }
+      }
 
-    canvas.toBlob(async (blob) => {
-      if (!blob) return;
-      await processImageBlob(blob, canvas.width, canvas.height);
-    }, 'image/jpeg', 0.9);
+      if (!captureCanvasRef.current) {
+        captureCanvasRef.current = document.createElement('canvas');
+      }
+      const capCanvas = captureCanvasRef.current;
+      if (capCanvas.width !== targetW || capCanvas.height !== targetH) {
+        capCanvas.width = targetW;
+        capCanvas.height = targetH;
+      }
+
+      const capCtx = capCanvas.getContext('2d');
+      capCtx.drawImage(video, 0, 0, targetW, targetH);
+
+      // Đảm bảo canvas hiển thị khớp kích thước video stream
+      const displayCanvas = canvasRef.current;
+      if (displayCanvas && (displayCanvas.width !== origW || displayCanvas.height !== origH)) {
+        displayCanvas.width = origW;
+        displayCanvas.height = origH;
+      }
+
+      // Nén JPEG 0.7: Giảm dung lượng ~20 lần (~800KB -> ~35KB) mà YOLOv8/FaceNet vẫn đạt độ chính xác tối đa
+      capCanvas.toBlob(async (blob) => {
+        if (!blob) {
+          resolve();
+          return;
+        }
+        const scaleRatioX = origW / targetW;
+        const scaleRatioY = origH / targetH;
+        await processImageBlob(blob, origW, origH, null, scaleRatioX, scaleRatioY);
+        resolve();
+      }, 'image/jpeg', 0.7);
+    });
   };
 
-  // Xử lý gửi ảnh nhận diện
-  const processImageBlob = async (blob, imgWidth, imgHeight, imgElement = null) => {
+  // Xử lý gửi ảnh nhận diện Fusion (Face + Body Re-ID)
+  const processImageBlob = async (blob, imgWidth, imgHeight, imgElement = null, scaleRatioX = 1, scaleRatioY = 1) => {
+    if (isProcessingRef.current) return;
     setIsProcessing(true);
+    isProcessingRef.current = true;
     setErrorMessage('');
+    const startTime = performance.now();
+
     try {
-      const result = await detectFace(blob, threshold);
+      const result = await detectFusion(blob, threshold, bodyThreshold);
+      const latency = Math.round(performance.now() - startTime);
+      setStreamLatency(latency);
+
+      // Tính toán FPS thực tế
+      frameCountRef.current += 1;
+      const now = Date.now();
+      const timeDiff = now - lastFpsTimeRef.current;
+      if (timeDiff >= 1000) {
+        const currentFps = Math.round((frameCountRef.current * 10000) / timeDiff) / 10;
+        setStreamFps(currentFps);
+        frameCountRef.current = 0;
+        lastFpsTimeRef.current = now;
+      }
+
       setLastResult(result);
 
-      // Vẽ bounding box nếu có
-      drawBoundingBox(result, imgWidth, imgHeight, imgElement || staticImageRef.current);
+      // Vẽ bounding box (với scale tỉ lệ tọa độ để khớp chuẩn màn hình)
+      drawBoundingBox(result, imgWidth, imgHeight, imgElement || staticImageRef.current, scaleRatioX, scaleRatioY);
 
-      // Nếu phát hiện trùng khớp người thân
-      if (result.matched && result.hoSo) {
-        playAlertSound();
-        setAlertData(result);
+      // Nếu phát hiện trùng khớp người thân (ưu tiên Face Recognition)
+      const firstMatch = result.detections?.find(
+        (d) =>
+          (d.fusion?.status === 'CONFIRMED' ||
+            d.fusion?.status === 'FACE_MATCH_BODY_MISMATCH' ||
+            d.fusion?.status === 'FACE_CANDIDATE') &&
+          d.hoSo
+      );
+
+      if (result.matched && firstMatch) {
+        // Throttle chuông cảnh báo 3s để không réo inh ỏi khi quét liên tục 5 FPS
+        const nowAlert = Date.now();
+        if (nowAlert - lastAlertTimeRef.current > 3000) {
+          playAlertSound();
+          lastAlertTimeRef.current = nowAlert;
+        }
+
+        setAlertData({
+          matched: true,
+          status: firstMatch.fusion?.status,
+          bodyWarning: firstMatch.fusion?.bodyWarning || false,
+          message: firstMatch.fusion?.message || '',
+          faceSimilarity: firstMatch.face?.similarity || 0,
+          bodySimilarity: firstMatch.body?.similarity || 0,
+          hoSo: firstMatch.hoSo,
+          anhChupUrl: result.anhChupUrl,
+        });
         if (onNewAlert) onNewAlert(result);
       }
     } catch (err) {
-      setErrorMessage('Lỗi xử lý nhận diện: ' + err.message);
+      if (isCameraActiveRef.current || monitorMode === 'image') {
+        setErrorMessage('Lỗi xử lý nhận diện: ' + err.message);
+      }
     } finally {
       setIsProcessing(false);
+      isProcessingRef.current = false;
     }
   };
 
@@ -231,8 +339,8 @@ export default function CameraMonitor({ onNewAlert }) {
     }
   };
 
-  // Vẽ khung khuôn mặt cho tất cả các khuôn mặt được phát hiện trên canvas chỉ định
-  const drawBoxesOnTargetCanvas = (targetCanvas, result, width, height, currentImg = null) => {
+  // Vẽ khung nhận diện cho tất cả đối tượng phát hiện (Face & Body Re-ID song song)
+  const drawBoxesOnTargetCanvas = (targetCanvas, result, width, height, currentImg = null, scaleRatioX = 1, scaleRatioY = 1) => {
     if (!targetCanvas) return;
     const ctx = targetCanvas.getContext('2d');
 
@@ -250,18 +358,34 @@ export default function CameraMonitor({ onNewAlert }) {
       ctx.drawImage(imgToDraw, 0, 0, targetCanvas.width, targetCanvas.height);
     }
 
-    if (!result) return;
-
-    const detections = result.detections && result.detections.length > 0
+    let detections = result?.detections && result.detections.length > 0
       ? result.detections
-      : (result.bbox ? [{
-          bbox: result.bbox,
-          matched: result.matched,
-          similarity: result.similarity,
-          hoSo: result.hoSo,
-        }] : []);
+      : (result?.bbox ? [{
+        bbox: result.bbox,
+        matched: result.matched,
+        similarity: result.similarity,
+        hoSo: result.hoSo,
+      }] : []);
 
-    if (detections.length === 0) return;
+    // Giải pháp 4: Chống nhấp nháy (Anti-flicker & Box Persistence)
+    // Nếu trong 1 frame tạm thời không bắt được mặt, giữ lại frame trước tối đa 350ms
+    if (targetCanvas === canvasRef.current && !staticImageRef.current) {
+      if (detections.length > 0) {
+        lastValidDetectionsRef.current = {
+          detections: detections,
+          timestamp: Date.now(),
+        };
+        ctx.globalAlpha = 1.0;
+      } else if (Date.now() - lastValidDetectionsRef.current.timestamp < 350) {
+        detections = lastValidDetectionsRef.current.detections;
+        ctx.globalAlpha = 0.75;
+      }
+    }
+
+    if (detections.length === 0) {
+      ctx.globalAlpha = 1.0;
+      return;
+    }
 
     const scale = Math.max(targetCanvas.width, targetCanvas.height) / 1000;
     const lineWidth = Math.max(3, Math.round(3 * scale));
@@ -271,98 +395,273 @@ export default function CameraMonitor({ onNewAlert }) {
     const cornerSize = Math.max(12, Math.round(18 * scale));
 
     detections.forEach((det, index) => {
-      if (!det.bbox || det.bbox.length < 4) return;
-      const [x1, y1, x2, y2] = det.bbox;
-      const boxW = x2 - x1;
-      const boxH = y2 - y1;
-      const simPercent = ((det.similarity || 0) * 100).toFixed(1);
-      const cLen = Math.min(cornerSize, boxW / 3, boxH / 3);
+      // 1. Kiểm tra nếu là kết quả Fusion
+      if (det.fusion) {
+        const status = det.fusion.status || 'UNKNOWN';
+        let statusColor = '#94a3b8'; // Mặc định: slate gray
+        let badgeBg = 'rgba(15, 23, 42, 0.92)';
+        let badgeText = '#e2e8f0';
 
-      if (det.matched) {
-        ctx.fillStyle = 'rgba(239, 68, 68, 0.16)';
-        ctx.fillRect(x1, y1, boxW, boxH);
+        if (status === 'CONFIRMED') {
+          statusColor = '#ec0000ff';
+          badgeBg = '#f30303ff';
+          badgeText = '#ffffffff';
+        } else if (status === 'FACE_MATCH_BODY_MISMATCH') {
+          statusColor = '#b6280fff';
+          badgeBg = '#ea580c';
+          badgeText = '#ffffff';
+        } else if (status === 'FACE_CANDIDATE') {
+          statusColor = '#790606ff';
+          badgeBg = '#ce2a14ff';
+          badgeText = '#ffffff';
+        } else if (status === 'BODY_CANDIDATE') {
+          statusColor = '#ee1935ff';
+          badgeBg = '#e41e1eff';
+          badgeText = '#ffffff';
+        }
 
-        ctx.strokeStyle = '#ef4444';
-        ctx.lineWidth = lineWidth;
-        ctx.strokeRect(x1, y1, boxW, boxH);
+        // Vẽ Body Bounding Box (Outer, Solid)
+        const rawBodyBox = det.body?.bbox || det.bbox;
+        let bx1, by1, bx2, by2, bw, bh;
+        if (rawBodyBox && rawBodyBox.length >= 4) {
+          bx1 = rawBodyBox[0] * scaleRatioX;
+          by1 = rawBodyBox[1] * scaleRatioY;
+          bx2 = rawBodyBox[2] * scaleRatioX;
+          by2 = rawBodyBox[3] * scaleRatioY;
+          bw = bx2 - bx1;
+          bh = by2 - by1;
+          const cLen = Math.min(cornerSize, bw / 3, bh / 3);
 
-        ctx.strokeStyle = '#ff2222';
-        ctx.lineWidth = lineWidth + 2.5;
-        ctx.beginPath();
-        ctx.moveTo(x1, y1 + cLen); ctx.lineTo(x1, y1); ctx.lineTo(x1 + cLen, y1);
-        ctx.moveTo(x2 - cLen, y1); ctx.lineTo(x2, y1); ctx.lineTo(x2, y1 + cLen);
-        ctx.moveTo(x1, y2 - cLen); ctx.lineTo(x1, y2); ctx.lineTo(x1 + cLen, y2);
-        ctx.moveTo(x2 - cLen, y2); ctx.lineTo(x2, y2); ctx.lineTo(x2, y2 - cLen);
-        ctx.stroke();
+          ctx.fillStyle = status === 'CONFIRMED'
+            ? 'rgba(239, 68, 68, 0.12)'
+            : status === 'FACE_MATCH_BODY_MISMATCH'
+              ? 'rgba(249, 115, 22, 0.12)'
+              : 'rgba(59, 130, 246, 0.06)';
+          ctx.fillRect(bx1, by1, bw, bh);
 
-        const label = `🚨 TRÙNG KHỚP: ${det.hoSo?.hoTen || 'Người thân'} (${simPercent}%)`;
-        ctx.font = `bold ${fontSize}px Inter, sans-serif`;
-        const textWidth = ctx.measureText(label).width;
-        const labelY = Math.max(0, y1 - badgeHeight);
+          ctx.strokeStyle = statusColor;
+          ctx.lineWidth = lineWidth;
+          ctx.setLineDash([]);
+          ctx.strokeRect(bx1, by1, bw, bh);
 
-        ctx.fillStyle = '#dc2626';
-        ctx.fillRect(x1, labelY, textWidth + pad * 2, badgeHeight);
-        ctx.strokeStyle = '#fca5a5';
-        ctx.lineWidth = 1;
-        ctx.strokeRect(x1, labelY, textWidth + pad * 2, badgeHeight);
+          // Vẽ góc nổi bật
+          ctx.strokeStyle = statusColor;
+          ctx.lineWidth = lineWidth + 2;
+          ctx.beginPath();
+          ctx.moveTo(bx1, by1 + cLen); ctx.lineTo(bx1, by1); ctx.lineTo(bx1 + cLen, by1);
+          ctx.moveTo(bx2 - cLen, by1); ctx.lineTo(bx2, by1); ctx.lineTo(bx2, by1 + cLen);
+          ctx.moveTo(bx1, by2 - cLen); ctx.lineTo(bx1, by2); ctx.lineTo(bx1 + cLen, by2);
+          ctx.moveTo(bx2 - cLen, by2); ctx.lineTo(bx2, by2); ctx.lineTo(bx2, by2 - cLen);
+          ctx.stroke();
 
-        ctx.fillStyle = '#ffffff';
-        ctx.fillText(label, x1 + pad, labelY + fontSize + pad - 2);
+          // Nhãn thân hình bên dưới khung
+          if (det.body) {
+            const bodySimPercent = ((det.body.similarity || 0) * 100).toFixed(0);
+            const bodyLabel = det.body.matched
+              ? `Thân hình P#${det.hoSo?.hoTen || det.body.personId}: ${bodySimPercent}%`
+              : `Thân hình: ${bodySimPercent}%`;
+            ctx.font = `${Math.max(11, fontSize - 2)}px Inter, sans-serif`;
+            const bWidth = ctx.measureText(bodyLabel).width;
+            ctx.fillStyle = 'rgba(15, 23, 42, 0.85)';
+            ctx.fillRect(bx1, by2 + 2, bWidth + pad * 2, fontSize + pad);
+            ctx.fillStyle = statusColor;
+            ctx.fillText(bodyLabel, bx1 + pad, by2 + fontSize + 2);
+          }
+        }
 
+        // Vẽ Face Bounding Box (Inner, Dashed, Red)
+        let fx1, fy1, fx2, fy2, fw, fh;
+        if (det.face?.bbox && det.face.bbox.length >= 4) {
+          fx1 = det.face.bbox[0] * scaleRatioX;
+          fy1 = det.face.bbox[1] * scaleRatioY;
+          fx2 = det.face.bbox[2] * scaleRatioX;
+          fy2 = det.face.bbox[3] * scaleRatioY;
+          fw = fx2 - fx1;
+          fh = fy2 - fy1;
+
+          ctx.strokeStyle = '#fa0303ff';
+          ctx.lineWidth = Math.max(2, lineWidth - 1);
+          ctx.setLineDash([5, 4]); // Nét đứt
+          ctx.strokeRect(fx1, fy1, fw, fh);
+          ctx.setLineDash([]); // Reset nét liền
+
+          const faceSimPercent = ((det.face.similarity || 0) * 100).toFixed(0);
+          const faceLabel = det.face.matched
+            ? `${det.hoSo?.hoTen || 'Người thân'}: ${faceSimPercent}%`
+            : `Mặt: ${faceSimPercent}%`;
+          ctx.font = `bold ${Math.max(11, fontSize - 2)}px Inter, sans-serif`;
+          const fWidth = ctx.measureText(faceLabel).width;
+          const fLabelY = Math.max(0, fy1 - (fontSize + pad));
+          ctx.fillStyle = 'rgba(233, 14, 25, 0.9)';
+          ctx.fillRect(fx1, fLabelY, fWidth + pad * 2, fontSize + pad);
+          ctx.fillStyle = '#ffffff';
+          ctx.fillText(faceLabel, fx1 + pad, fLabelY + fontSize - 2);
+        }
+
+        // Top Header Badge trên Body Box (hoặc Face Box nếu không thấy Body)
+        const anchorBox = (rawBodyBox && rawBodyBox.length >= 4) ? [bx1, by1, bx2, by2] : (det.face?.bbox ? [fx1, fy1, fx2, fy2] : null);
+        if (anchorBox && anchorBox.length >= 4) {
+          const [ax1, ay1] = anchorBox;
+          let mainLabel = '';
+          if (status === 'CONFIRMED') {
+            mainLabel = `🚨 XÁC NHẬN: ${det.hoSo?.hoTen || 'Người thân'}`;
+          } else if (status === 'FACE_MATCH_BODY_MISMATCH') {
+            mainLabel = `⚠️ MẶT KHỚP (NGHI VẤN BODY): ${det.hoSo?.hoTen || 'Người thân'}`;
+          } else if (status === 'FACE_CANDIDATE') {
+            mainLabel = `👤 KHỚP MẶT: ${det.hoSo?.hoTen || 'Người thân'}`;
+          } else if (status === 'BODY_CANDIDATE') {
+            mainLabel = `🚶 NGHI VẤN TRANG PHỤC (P#${det.body?.personId || '?'})`;
+          } else {
+            mainLabel = `✓ Chưa khớp (#${index + 1})`;
+          }
+
+          ctx.font = `bold ${fontSize}px Inter, sans-serif`;
+          const mainWidth = ctx.measureText(mainLabel).width;
+          const labelY = Math.max(0, ay1 - badgeHeight);
+
+          ctx.fillStyle = badgeBg;
+          ctx.fillRect(ax1, labelY, mainWidth + pad * 2, badgeHeight);
+          ctx.strokeStyle = statusColor;
+          ctx.lineWidth = 1;
+          ctx.strokeRect(ax1, labelY, mainWidth + pad * 2, badgeHeight);
+
+          ctx.fillStyle = badgeText;
+          ctx.fillText(mainLabel, ax1 + pad, labelY + fontSize + pad - 2);
+        }
       } else {
-        ctx.fillStyle = 'rgba(6, 182, 212, 0.08)';
-        ctx.fillRect(x1, y1, boxW, boxH);
+        // 2. Chế độ cũ (Face-only backward compatibility)
+        if (!det.bbox || det.bbox.length < 4) return;
+        const x1 = det.bbox[0] * scaleRatioX;
+        const y1 = det.bbox[1] * scaleRatioY;
+        const x2 = det.bbox[2] * scaleRatioX;
+        const y2 = det.bbox[3] * scaleRatioY;
+        const boxW = x2 - x1;
+        const boxH = y2 - y1;
+        const simPercent = ((det.similarity || 0) * 100).toFixed(1);
+        const cLen = Math.min(cornerSize, boxW / 3, boxH / 3);
 
-        ctx.strokeStyle = '#06b6d4';
-        ctx.lineWidth = lineWidth;
-        ctx.strokeRect(x1, y1, boxW, boxH);
+        if (det.matched) {
+          ctx.fillStyle = 'rgba(239, 68, 68, 0.16)';
+          ctx.fillRect(x1, y1, boxW, boxH);
 
-        ctx.strokeStyle = '#38bdf8';
-        ctx.lineWidth = lineWidth + 1.5;
-        ctx.beginPath();
-        ctx.moveTo(x1, y1 + cLen); ctx.lineTo(x1, y1); ctx.lineTo(x1 + cLen, y1);
-        ctx.moveTo(x2 - cLen, y1); ctx.lineTo(x2, y1); ctx.lineTo(x2, y1 + cLen);
-        ctx.moveTo(x1, y2 - cLen); ctx.lineTo(x1, y2); ctx.lineTo(x1 + cLen, y2);
-        ctx.moveTo(x2 - cLen, y2); ctx.lineTo(x2, y2); ctx.lineTo(x2, y2 - cLen);
-        ctx.stroke();
+          ctx.strokeStyle = '#ef4444';
+          ctx.lineWidth = lineWidth;
+          ctx.strokeRect(x1, y1, boxW, boxH);
 
-        const label = `✓ Chưa khớp (#${index + 1} • ${simPercent}%)`;
-        ctx.font = `${fontSize}px Inter, sans-serif`;
-        const textWidth = ctx.measureText(label).width;
-        const labelY = Math.max(0, y1 - badgeHeight);
+          ctx.strokeStyle = '#ff2222';
+          ctx.lineWidth = lineWidth + 2.5;
+          ctx.beginPath();
+          ctx.moveTo(x1, y1 + cLen); ctx.lineTo(x1, y1); ctx.lineTo(x1 + cLen, y1);
+          ctx.moveTo(x2 - cLen, y1); ctx.lineTo(x2, y1); ctx.lineTo(x2, y1 + cLen);
+          ctx.moveTo(x1, y2 - cLen); ctx.lineTo(x1, y2); ctx.lineTo(x1 + cLen, y2);
+          ctx.moveTo(x2 - cLen, y2); ctx.lineTo(x2, y2); ctx.lineTo(x2, y2 - cLen);
+          ctx.stroke();
 
-        ctx.fillStyle = 'rgba(10, 20, 40, 0.92)';
-        ctx.fillRect(x1, labelY, textWidth + pad * 2, badgeHeight);
-        ctx.strokeStyle = '#06b6d4';
-        ctx.lineWidth = 1;
-        ctx.strokeRect(x1, labelY, textWidth + pad * 2, badgeHeight);
+          const label = `🚨 TRÙNG KHỚP: ${det.hoSo?.hoTen || 'Người thân'} (${simPercent}%)`;
+          ctx.font = `bold ${fontSize}px Inter, sans-serif`;
+          const textWidth = ctx.measureText(label).width;
+          const labelY = Math.max(0, y1 - badgeHeight);
 
-        ctx.fillStyle = '#38bdf8';
-        ctx.fillText(label, x1 + pad, labelY + fontSize + pad - 2);
+          ctx.fillStyle = '#fcfbfbff';
+          ctx.fillRect(x1, labelY, textWidth + pad * 2, badgeHeight);
+          ctx.strokeStyle = '#fca5a5';
+          ctx.lineWidth = 1;
+          ctx.strokeRect(x1, labelY, textWidth + pad * 2, badgeHeight);
+
+          ctx.fillStyle = '#ffffff';
+          ctx.fillText(label, x1 + pad, labelY + fontSize + pad - 2);
+        } else {
+          ctx.fillStyle = 'rgba(6, 182, 212, 0.08)';
+          ctx.fillRect(x1, y1, boxW, boxH);
+
+          ctx.strokeStyle = '#06b6d4';
+          ctx.lineWidth = lineWidth;
+          ctx.strokeRect(x1, y1, boxW, boxH);
+
+          ctx.strokeStyle = '#38bdf8';
+          ctx.lineWidth = lineWidth + 1.5;
+          ctx.beginPath();
+          ctx.moveTo(x1, y1 + cLen); ctx.lineTo(x1, y1); ctx.lineTo(x1 + cLen, y1);
+          ctx.moveTo(x2 - cLen, y1); ctx.lineTo(x2, y1); ctx.lineTo(x2, y1 + cLen);
+          ctx.moveTo(x1, y2 - cLen); ctx.lineTo(x1, y2); ctx.lineTo(x1 + cLen, y2);
+          ctx.moveTo(x2 - cLen, y2); ctx.lineTo(x2, y2); ctx.lineTo(x2, y2 - cLen);
+          ctx.stroke();
+
+          const label = `✓ Chưa khớp (#${index + 1} • ${simPercent}%)`;
+          ctx.font = `${fontSize}px Inter, sans-serif`;
+          const textWidth = ctx.measureText(label).width;
+          const labelY = Math.max(0, y1 - badgeHeight);
+
+          ctx.fillStyle = 'rgba(10, 20, 40, 0.92)';
+          ctx.fillRect(x1, labelY, textWidth + pad * 2, badgeHeight);
+          ctx.strokeStyle = '#06b6d4';
+          ctx.lineWidth = 1;
+          ctx.strokeRect(x1, labelY, textWidth + pad * 2, badgeHeight);
+
+          ctx.fillStyle = '#38bdf8';
+          ctx.fillText(label, x1 + pad, labelY + fontSize + pad - 2);
+        }
       }
     });
+
+    ctx.globalAlpha = 1.0;
   };
 
-  const drawBoundingBox = (result, width, height, currentImg = null) => {
-    drawBoxesOnTargetCanvas(canvasRef.current, result, width, height, currentImg);
+  const drawBoundingBox = (result, width, height, currentImg = null, scaleRatioX = 1, scaleRatioY = 1) => {
+    drawBoxesOnTargetCanvas(canvasRef.current, result, width, height, currentImg, scaleRatioX, scaleRatioY);
   };
 
-  const drawVideoBoundingBox = (result, width, height) => {
-    drawBoxesOnTargetCanvas(videoCanvasRef.current, result, width, height, null);
+  const drawVideoBoundingBox = (result, width, height, scaleRatioX = 1, scaleRatioY = 1) => {
+    drawBoxesOnTargetCanvas(videoCanvasRef.current, result, width, height, null, scaleRatioX, scaleRatioY);
   };
 
-  // Tự động quét theo chu kỳ (khi bật camera)
+  // Vòng lặp quét thích ứng phi nghẽn (~3 - 5 FPS mượt mà)
+  const runAutoScanLoop = async () => {
+    if (!isAutoScanRef.current || !isCameraActiveRef.current) {
+      return;
+    }
+
+    if (!isProcessingRef.current && videoRef.current) {
+      await captureAndDetect();
+    }
+
+    if (isAutoScanRef.current && isCameraActiveRef.current) {
+      autoScanLoopTimeoutRef.current = setTimeout(runAutoScanLoop, 60);
+    }
+  };
+
+  // Đồng bộ trạng thái refs và kích hoạt vòng lặp auto-scan
   useEffect(() => {
-    let intervalId = null;
+    isAutoScanRef.current = isAutoScan;
     if (isCameraActive && isAutoScan && monitorMode === 'webcam') {
-      intervalId = setInterval(() => {
-        captureAndDetect();
-      }, 2000);
+      runAutoScanLoop();
+    } else {
+      if (autoScanLoopTimeoutRef.current) {
+        clearTimeout(autoScanLoopTimeoutRef.current);
+        autoScanLoopTimeoutRef.current = null;
+      }
+      setStreamFps(0);
+      setStreamLatency(0);
     }
     return () => {
-      if (intervalId) clearInterval(intervalId);
+      if (autoScanLoopTimeoutRef.current) {
+        clearTimeout(autoScanLoopTimeoutRef.current);
+        autoScanLoopTimeoutRef.current = null;
+      }
     };
-  }, [isCameraActive, isAutoScan, threshold, monitorMode]);
+  }, [isCameraActive, isAutoScan, monitorMode]);
+
+  useEffect(() => {
+    isCameraActiveRef.current = isCameraActive;
+    if (!isCameraActive) {
+      if (autoScanLoopTimeoutRef.current) {
+        clearTimeout(autoScanLoopTimeoutRef.current);
+        autoScanLoopTimeoutRef.current = null;
+      }
+      setStreamFps(0);
+      setStreamLatency(0);
+    }
+  }, [isCameraActive]);
 
   // Xử lý tải ảnh tĩnh từ file
   const handleFileUpload = (e) => {
@@ -467,7 +766,7 @@ export default function CameraMonitor({ onNewAlert }) {
     setErrorMessage('');
   };
 
-  // Chụp khung hình từ video và gửi nhận diện thời gian thực
+  // Chụp khung hình từ video và gửi nhận diện thời gian thực (Fusion)
   const captureAndDetectVideoFrame = async () => {
     const video = uploadedVideoRef.current;
     if (!video || liveScanInProgressRef.current) return;
@@ -495,21 +794,35 @@ export default function CameraMonitor({ onNewAlert }) {
         }
 
         try {
-          const result = await detectFace(blob, threshold);
+          const result = await detectFusion(blob, threshold, bodyThreshold);
           setLastResult(result);
 
           // Vẽ khung nhận diện lên canvas phủ trên video
           drawVideoBoundingBox(result, video.videoWidth, video.videoHeight);
 
-          if (result.matched && result.hoSo) {
+          // Ưu tiên Face Recognition
+          const firstMatch = result.detections?.find(
+            (d) =>
+              (d.fusion?.status === 'CONFIRMED' ||
+                d.fusion?.status === 'FACE_MATCH_BODY_MISMATCH' ||
+                d.fusion?.status === 'FACE_CANDIDATE') &&
+              d.hoSo
+          );
+
+          if (result.matched && firstMatch) {
             const now = Date.now();
             if (now - lastAlertTimeRef.current > 4000) {
               lastAlertTimeRef.current = now;
               playAlertSound();
               setAlertData({
                 matched: true,
-                similarity: result.similarity,
-                hoSo: result.hoSo,
+                status: firstMatch.fusion?.status,
+                bodyWarning: firstMatch.fusion?.bodyWarning || false,
+                message: firstMatch.fusion?.message || '',
+                faceSimilarity: firstMatch.face?.similarity || 0,
+                bodySimilarity: firstMatch.body?.similarity || 0,
+                similarity: firstMatch.face?.similarity || 0,
+                hoSo: firstMatch.hoSo,
                 anhChupUrl: result.anhChupUrl,
               });
               if (onNewAlert) onNewAlert(result);
@@ -544,17 +857,36 @@ export default function CameraMonitor({ onNewAlert }) {
     );
 
     if (matchedEvent) {
+      const targetPerson = matchedEvent.hoSo || matchedEvent.person;
       const simulatedResult = {
         matched: true,
-        similarity: matchedEvent.similarity,
-        hoSo: matchedEvent.person,
-        message: `Khớp người thân: ${matchedEvent.person?.hoTen || 'Người thân'} (Mốc ${matchedEvent.timestampFormatted || Math.floor(currentTime) + 's'})`,
+        similarity: matchedEvent.faceSimilarity || matchedEvent.bodySimilarity || matchedEvent.similarity || 0,
+        hoSo: targetPerson,
+        message: `Khớp người thân: ${targetPerson?.hoTen || 'Người thân'} (Mốc ${matchedEvent.timestampFormatted || Math.floor(currentTime) + 's'})`,
         detections: [
           {
             bbox: matchedEvent.bbox,
             matched: true,
-            similarity: matchedEvent.similarity,
-            hoSo: matchedEvent.person,
+            similarity: matchedEvent.faceSimilarity || matchedEvent.bodySimilarity || matchedEvent.similarity || 0,
+            hoSo: targetPerson,
+            fusion: {
+              status: matchedEvent.fusionStatus || 'CONFIRMED',
+              personId: matchedEvent.personId,
+              bodyWarning: matchedEvent.bodyWarning,
+              message: matchedEvent.message,
+            },
+            face: matchedEvent.faceSimilarity != null ? {
+              matched: true,
+              personId: matchedEvent.personId,
+              similarity: matchedEvent.faceSimilarity,
+              bbox: matchedEvent.bbox,
+            } : null,
+            body: matchedEvent.bodySimilarity != null ? {
+              matched: true,
+              personId: matchedEvent.personId,
+              similarity: matchedEvent.bodySimilarity,
+              bbox: matchedEvent.bbox,
+            } : null,
           },
         ],
       };
@@ -615,7 +947,7 @@ export default function CameraMonitor({ onNewAlert }) {
     if (!videoFile || isVideoAnalyzing) return;
     setIsVideoAnalyzing(true);
     setAnalysisProgress(5);
-    setAnalysisStageText('Khởi tạo phiên phân tích AI...');
+    setAnalysisStageText('Khởi tạo phiên phân tích Fusion AI...');
     setAnalysisDetailText(`Tệp: ${videoFile.name} (${(videoFile.size / (1024 * 1024)).toFixed(1)} MB)`);
     setAnalysisElapsedTime(0);
     setErrorMessage('');
@@ -630,7 +962,7 @@ export default function CameraMonitor({ onNewAlert }) {
     let aiSimInterval = null;
 
     try {
-      const result = await detectVideo(videoFile, threshold, frameInterval, (prog) => {
+      const result = await detectFusionVideo(videoFile, threshold, bodyThreshold, frameInterval, (prog) => {
         if (prog.phase === 'upload') {
           // Giai đoạn Upload chiếm từ 5% -> 40% tổng tiến trình
           const uploadPct = Math.round(5 + (prog.percent / 100) * 35);
@@ -642,8 +974,8 @@ export default function CameraMonitor({ onNewAlert }) {
 
           if (prog.percent >= 100) {
             setAnalysisProgress(45);
-            setAnalysisStageText('Máy chủ đã nhận tệp. Đang kích hoạt tiến trình AI...');
-            setAnalysisDetailText('YOLOv8 & OpenCV đang chuẩn bị trích xuất khung hình');
+            setAnalysisStageText('Máy chủ đã nhận tệp. Đang kích hoạt tiến trình AI kép...');
+            setAnalysisDetailText('YOLOv8-Face & YOLOv8-Person đang chuẩn bị quét song song');
 
             // Giai đoạn AI xử lý: 45% -> 95%
             let currentPct = 45;
@@ -651,18 +983,18 @@ export default function CameraMonitor({ onNewAlert }) {
               if (currentPct < 65) {
                 currentPct += 2.5;
                 setAnalysisProgress(Math.floor(currentPct));
-                setAnalysisStageText('Bước 1/3: Trích xuất khung hình CCTV và phát hiện khuôn mặt...');
-                setAnalysisDetailText('Mô hình YOLOv8-Face đang quét toạ độ khuôn mặt từng giây');
+                setAnalysisStageText('Bước 1/3: Phát hiện khuôn mặt và toàn thân song song...');
+                setAnalysisDetailText('Mô hình YOLOv8-Face và YOLOv8-Person đang quét toạ độ');
               } else if (currentPct < 85) {
                 currentPct += 1.8;
                 setAnalysisProgress(Math.floor(currentPct));
-                setAnalysisStageText('Bước 2/3: Căn chỉnh 5 điểm giải phẫu & Trích xuất đặc trưng...');
-                setAnalysisDetailText('MobileFaceNet đang tính toán vector đặc trưng 512 chiều');
+                setAnalysisStageText('Bước 2/3: MobileFaceNet (512-d) & ResNet-50 CUHK03 (2048-d)...');
+                setAnalysisDetailText('Trích xuất đặc trưng khuôn mặt & Body Person Re-ID');
               } else if (currentPct < 96) {
                 currentPct += 0.8;
                 setAnalysisProgress(Math.floor(currentPct));
-                setAnalysisStageText('Bước 3/3: So khớp Cosine Similarity với CSDL FAISS...');
-                setAnalysisDetailText('Đang đối sánh với toàn bộ hồ sơ người mất tích đã đăng ký');
+                setAnalysisStageText('Bước 3/3: Đối sánh FAISS kép & Phân tích Fusion...');
+                setAnalysisDetailText('Đang đối sánh với toàn bộ hồ sơ và liên kết Face-Body');
               }
             }, 600);
           }
@@ -693,8 +1025,12 @@ export default function CameraMonitor({ onNewAlert }) {
         const bestPerson = result.uniquePersons[0];
         setAlertData({
           matched: true,
-          similarity: bestPerson.maxSimilarity,
-          hoSo: bestPerson.person,
+          status: bestPerson.fusionStatus || 'CONFIRMED',
+          bodyWarning: bestPerson.fusionStatus === 'FACE_MATCH_BODY_MISMATCH',
+          faceSimilarity: bestPerson.maxFaceSimilarity || 0,
+          bodySimilarity: bestPerson.maxBodySimilarity || 0,
+          similarity: bestPerson.maxFaceSimilarity || bestPerson.maxSimilarity || 0,
+          hoSo: bestPerson.hoSo || bestPerson.person,
           anhChupUrl: bestPerson.bestSnapshotUrl,
         });
         if (onNewAlert) onNewAlert(result);
@@ -717,22 +1053,41 @@ export default function CameraMonitor({ onNewAlert }) {
   const jumpToTimestamp = (seconds, event = null) => {
     if (uploadedVideoRef.current) {
       uploadedVideoRef.current.currentTime = seconds;
-      uploadedVideoRef.current.play().catch(() => {});
+      uploadedVideoRef.current.play().catch(() => { });
     }
     setSelectedTimelineEvent(event);
     if (event && uploadedVideoRef.current) {
       const video = uploadedVideoRef.current;
+      const targetPerson = event.hoSo || event.person;
       const simulatedResult = {
         matched: true,
-        similarity: event.similarity,
-        hoSo: event.person,
-        message: `Phát hiện ${event.person?.hoTen || 'người thân'} tại mốc ${event.timestampFormatted || seconds + 's'}`,
+        similarity: event.faceSimilarity || event.bodySimilarity || event.similarity || 0,
+        hoSo: targetPerson,
+        message: `Phát hiện ${targetPerson?.hoTen || 'người thân'} tại mốc ${event.timestampFormatted || seconds + 's'}`,
         detections: [
           {
             bbox: event.bbox,
             matched: true,
-            similarity: event.similarity,
-            hoSo: event.person,
+            similarity: event.faceSimilarity || event.bodySimilarity || event.similarity || 0,
+            hoSo: targetPerson,
+            fusion: {
+              status: event.fusionStatus || 'CONFIRMED',
+              personId: event.personId,
+              bodyWarning: event.bodyWarning,
+              message: event.message,
+            },
+            face: event.faceSimilarity != null ? {
+              matched: true,
+              personId: event.personId,
+              similarity: event.faceSimilarity,
+              bbox: event.bbox,
+            } : null,
+            body: event.bodySimilarity != null ? {
+              matched: true,
+              personId: event.personId,
+              similarity: event.bodySimilarity,
+              bbox: event.bbox,
+            } : null,
           },
         ],
       };
@@ -751,6 +1106,9 @@ export default function CameraMonitor({ onNewAlert }) {
       );
     }
 
+    const firstDetection = result.detections?.[0];
+    const isFusion = Boolean(firstDetection?.fusion);
+
     return (
       <div className="detection-summary-card">
         <div className="flex items-center gap-2 mb-3">
@@ -759,68 +1117,159 @@ export default function CameraMonitor({ onNewAlert }) {
           ) : (
             <span className="badge badge-blue">
               ✓ {result.detections && result.detections.length > 0
-                ? `Phát hiện ${result.detections.length} khuôn mặt (Chưa khớp)`
+                ? `Phát hiện ${result.detections.length} đối tượng (Chưa khớp)`
                 : 'Không trùng khớp'}
             </span>
           )}
-          <span className="text-xs text-muted">
-            Similarity: {((result.similarity || 0) * 100).toFixed(1)}%
-          </span>
+          {isFusion ? (
+            <span className="badge badge-purple text-xs font-mono">FINDME AI</span>
+          ) : (
+            <span className="text-xs text-muted">
+              Similarity: {((result.similarity || 0) * 100).toFixed(1)}%
+            </span>
+          )}
         </div>
 
         <p className="text-sm mb-3">{result.message}</p>
 
-        {/* Danh sách phân loại chi tiết từng khuôn mặt */}
+        {/* Danh sách phân loại chi tiết từng đối tượng */}
         {result.detections && result.detections.length > 0 && (
           <div className="faces-detection-breakdown">
             <div className="breakdown-title">
-              Khuôn mặt phát hiện ({result.detections.length})
+              Đối tượng phát hiện ({result.detections.length})
             </div>
             <div className="faces-list">
-              {result.detections.map((det, idx) => (
-                <div
-                  key={idx}
-                  className={`face-list-item ${det.matched ? 'item-matched' : 'item-unmatched'}`}
-                >
-                  <div className="face-item-header">
-                    <span className={`face-status-tag ${det.matched ? 'tag-matched' : 'tag-unmatched'}`}>
-                      {det.matched ? '🚨 TRÙNG KHỚP' : '✓ Chưa khớp'}
-                    </span>
-                    <span className="face-sim-value">
-                      Độ tương đồng: {((det.similarity || 0) * 100).toFixed(1)}%
-                    </span>
+              {result.detections.map((det, idx) => {
+                if (det.fusion) {
+                  const status = det.fusion.status || 'UNKNOWN';
+                  const isConfirmed = status === 'CONFIRMED';
+                  const isMismatch = status === 'FACE_MATCH_BODY_MISMATCH';
+                  const isFaceCand = status === 'FACE_CANDIDATE';
+                  const isBodyCand = status === 'BODY_CANDIDATE';
+
+                  let badgeClass = 'tag-unmatched';
+                  let statusTitle = '✓ Chưa khớp';
+                  if (isConfirmed) {
+                    badgeClass = 'tag-matched';
+                    statusTitle = '🚨 XÁC NHẬN';
+                  } else if (isMismatch) {
+                    badgeClass = 'tag-warning';
+                    statusTitle = '⚠️ KHỚP MẶT (CẢNH BÁO BODY)';
+                  } else if (isFaceCand) {
+                    badgeClass = 'tag-face';
+                    statusTitle = '👤 KHỚP KHUÔN MẶT';
+                  } else if (isBodyCand) {
+                    badgeClass = 'tag-body';
+                    statusTitle = '🚶 NGHI VẤN TRANG PHỤC';
+                  }
+
+                  return (
+                    <div
+                      key={idx}
+                      className={`face-list-item ${isConfirmed
+                        ? 'item-matched'
+                        : isMismatch
+                          ? 'item-warning'
+                          : isFaceCand || isBodyCand
+                            ? 'item-candidate'
+                            : 'item-unmatched'
+                        }`}
+                    >
+                      <div className="face-item-header">
+                        <span className={`face-status-tag ${badgeClass}`}>{statusTitle}</span>
+                        {det.hoSo && (
+                          <span className="font-semibold text-white text-xs">{det.hoSo.hoTen}</span>
+                        )}
+                      </div>
+
+                      {/* Thông tin 2 nguồn sinh trắc học độc lập */}
+                      <div className="grid grid-cols-2 gap-2 mt-1 text-xs">
+                        <div className="bg-slate-900/60 p-1.5 rounded border border-slate-700/50">
+                          <div className="text-muted text-[10px]">Khuôn mặt:</div>
+                          {det.face == null ? (
+                            <span className="text-slate-400">✗ Không phát hiện</span>
+                          ) : det.face.matched ? (
+                            <span className="text-emerald-400 font-semibold">
+                              ✓ Khớp ({(det.face.similarity * 100).toFixed(1)}%)
+                            </span>
+                          ) : (
+                            <span className="text-sky-300">
+                              Đã phân tích ({(det.face.similarity * 100).toFixed(1)}%)
+                            </span>
+                          )}
+                        </div>
+
+                        <div className="bg-slate-900/60 p-1.5 rounded border border-slate-700/50">
+                          <div className="text-muted text-[10px]">Trang phục:</div>
+                          {det.body == null ? (
+                            <span className="text-slate-400">✗ Không phát hiện</span>
+                          ) : det.body.matched ? (
+                            <span className="text-emerald-400 font-semibold">
+                              ✓ Khớp ({(det.body.similarity * 100).toFixed(1)}%)
+                            </span>
+                          ) : (
+                            <span className="text-cyan-300">
+                              Đã phân tích ({(det.body.similarity * 100).toFixed(1)}%)
+                            </span>
+                          )}
+                        </div>
+                      </div>
+
+                      {det.fusion.bodyWarning && (
+                        <div className="text-xs text-yellow-300 bg-yellow-950/40 p-1.5 rounded mt-1 border border-yellow-600/30">
+                          ⚠️ {det.fusion.message}
+                        </div>
+                      )}
+                    </div>
+                  );
+                }
+
+                // Chế độ Face-only cũ
+                return (
+                  <div
+                    key={idx}
+                    className={`face-list-item ${det.matched ? 'item-matched' : 'item-unmatched'}`}
+                  >
+                    <div className="face-item-header">
+                      <span className={`face-status-tag ${det.matched ? 'tag-matched' : 'tag-unmatched'}`}>
+                        {det.matched ? '🚨 TRÙNG KHỚP' : '✓ Chưa khớp'}
+                      </span>
+                      <span className="face-sim-value">
+                        Độ tương đồng: {((det.similarity || 0) * 100).toFixed(1)}%
+                      </span>
+                    </div>
+                    {det.matched && det.hoSo ? (
+                      <div className="face-match-info">
+                        <span className="font-semibold text-white">{det.hoSo.hoTen}</span>
+                        <span className="text-muted text-xs"> &bull; Khu vực: {det.hoSo.khuVuc || 'Chưa rõ'}</span>
+                      </div>
+                    ) : (
+                      <div className="text-xs text-muted">
+                        Người lạ / Không có trong CSDL người mất tích
+                      </div>
+                    )}
                   </div>
-                  {det.matched && det.hoSo ? (
-                    <div className="face-match-info">
-                      <span className="font-semibold text-white">{det.hoSo.hoTen}</span>
-                      <span className="text-muted text-xs"> &bull; Khu vực: {det.hoSo.khuVuc || 'Chưa rõ'}</span>
-                    </div>
-                  ) : (
-                    <div className="text-xs text-muted">
-                      Người lạ / Không có trong CSDL người mất tích
-                    </div>
-                  )}
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         )}
 
-        {result.matched && result.hoSo && (
+        {result.matched && (firstDetection?.hoSo || result.hoSo) && (
           <div className="matched-person-card">
             <img
-              src={getFullImageUrl(result.hoSo.anhDaiDienUrl)}
+              src={getFullImageUrl((firstDetection?.hoSo || result.hoSo).anhDaiDienUrl)}
               alt="Avatar"
               className="matched-avatar"
             />
             <div className="matched-details">
-              <div className="matched-name">{result.hoSo.hoTen}</div>
-              <div className="matched-sub">Khu vực: {result.hoSo.khuVuc || 'N/A'}</div>
-              {result.hoSo.lienHeNguoiThan && (
-                <div className="matched-sub">Email: {result.hoSo.lienHeNguoiThan}</div>
+              <div className="matched-name">{(firstDetection?.hoSo || result.hoSo).hoTen}</div>
+              <div className="matched-sub">Khu vực: {(firstDetection?.hoSo || result.hoSo).khuVuc || 'N/A'}</div>
+              {(firstDetection?.hoSo || result.hoSo).lienHeNguoiThan && (
+                <div className="matched-sub">Email: {(firstDetection?.hoSo || result.hoSo).lienHeNguoiThan}</div>
               )}
-              {result.hoSo.vectorIdFaiss != null && (
-                <div className="matched-sub">FAISS ID: #{result.hoSo.vectorIdFaiss}</div>
+              {(firstDetection?.hoSo || result.hoSo).vectorIdFaiss != null && (
+                <div className="matched-sub">FAISS ID: #{(firstDetection?.hoSo || result.hoSo).vectorIdFaiss}</div>
               )}
             </div>
           </div>
@@ -861,14 +1310,27 @@ export default function CameraMonitor({ onNewAlert }) {
 
       {/* Cảnh báo khẩn cấp dạng Banner khi phát hiện */}
       {alertData && (
-        <div className="emergency-banner alert-pulse">
+        <div className={`emergency-banner alert-pulse ${alertData.status === 'FACE_MATCH_BODY_MISMATCH' ? 'banner-warning-mismatch' : ''}`}>
           <div className="emergency-header">
             <div className="flex items-center gap-3">
-              <span className="emergency-icon">🚨</span>
+              <span className="emergency-icon">
+                {alertData.status === 'FACE_MATCH_BODY_MISMATCH' ? '⚠️' : '🚨'}
+              </span>
               <div>
-                <h3 className="emergency-title">PHÁT HIỆN TRÙNG KHỚP NGƯỜI THÂN!</h3>
+                <h3 className="emergency-title">
+                  {alertData.status === 'CONFIRMED'
+                    ? 'XÁC NHẬN: TRÙNG KHỚP CẢ KHUÔN MẶT VÀ TRANG PHỤC!'
+                    : alertData.status === 'FACE_MATCH_BODY_MISMATCH'
+                      ? 'NHẬN DẠNG THEO KHUÔN MẶT — CẢNH BÁO NGHI VẤN THÂN HÌNH!'
+                      : 'PHÁT HIỆN TRÙNG KHỚP KHUÔN MẶT NGƯỜI THÂN!'}
+                </h3>
                 <p className="emergency-subtitle">
-                  Hệ thống AI vừa nhận diện chính xác <strong>{alertData.hoSo?.hoTen}</strong>
+                  Hệ thống FINDME AI vừa nhận diện chính xác <strong>{alertData.hoSo?.hoTen}</strong>
+                  {alertData.bodyWarning && (
+                    <span className="ml-2 text-yellow-300 font-semibold">
+                      (⚠️ Lưu ý: Dáng người/trang phục có điểm nghi vấn)
+                    </span>
+                  )}
                 </p>
               </div>
             </div>
@@ -888,8 +1350,15 @@ export default function CameraMonitor({ onNewAlert }) {
                 />
               </div>
               <div className="comparison-divider">
-                <div className="match-score">{((alertData.similarity || 0) * 100).toFixed(1)}%</div>
-                <span className="match-text">Độ tương đồng</span>
+                <div className="match-score">
+                  {((alertData.faceSimilarity || alertData.similarity || 0) * 100).toFixed(1)}%
+                </div>
+                <span className="match-text text-lg font-bold">Độ tương đồng Khuôn Mặt</span>
+                {alertData.bodySimilarity > 0 && (
+                  <div className={`text-xs font-mono mt-1 ${alertData.bodyWarning ? 'text-amber-300' : 'text-cyan-300'}`}>
+                    Trang phục: {((alertData.bodySimilarity) * 100).toFixed(1)}% {alertData.bodyWarning ? '(Nghi vấn)' : '(Khớp)'}
+                  </div>
+                )}
               </div>
               <div className="comparison-card">
                 <span className="comparison-label">Ảnh Chụp Thời Điểm Phát Hiện</span>
@@ -900,6 +1369,12 @@ export default function CameraMonitor({ onNewAlert }) {
                 />
               </div>
             </div>
+
+            {alertData.bodyWarning && (
+              <div className="p-3 my-2 bg-yellow-950/70 border border-yellow-500/50 rounded-lg text-yellow-200 text-sm">
+                <strong>⚠️ Cảnh báo nghi vấn trang phục / dáng người:</strong> {alertData.message || 'Khuôn mặt trùng khớp với hồ sơ, nhưng dáng người hoặc trang phục không khớp. Nghi vấn đối tượng đã thay đổi trang phục hoặc đang đi cùng người khác.'}
+              </div>
+            )}
 
             <div className="emergency-meta">
               <div>📍 <strong>Khu vực mất tích:</strong> {alertData.hoSo?.khuVuc || 'Chưa rõ'}</div>
@@ -946,8 +1421,13 @@ export default function CameraMonitor({ onNewAlert }) {
                 </div>
               )}
               {monitorMode === 'webcam' && isAutoScan && (
-                <div className="badge badge-blue">
-                  Tự động quét (2s)
+                <div className="badge badge-blue flex items-center gap-1">
+                  <span className="live-radar-dot animate-pulse"></span> Quét liên tục (~5 FPS)
+                </div>
+              )}
+              {monitorMode === 'webcam' && isCameraActive && streamFps > 0 && (
+                <div className="badge badge-green flex items-center gap-1 font-mono text-xs">
+                  ⚡ {streamFps} FPS • {streamLatency}ms
                 </div>
               )}
               {monitorMode === 'image' && staticImage && (
@@ -1093,6 +1573,22 @@ export default function CameraMonitor({ onNewAlert }) {
                 />
 
                 {isProcessing && <div className="scanning-line"></div>}
+
+                {/* Webcam HUD Live Overlay */}
+                {isCameraActive && (
+                  <div className="video-hud-overlay">
+                    <div className={`video-hud-pill ${isAutoScan ? 'live-scan' : ''}`}>
+                      <span className={`live-radar-dot ${isAutoScan ? 'animate-pulse' : ''}`}></span>
+                      <span>{isAutoScan ? 'AI QUÉT LIÊN TỤC' : 'CAMERA SẴN SÀNG'}</span>
+                      {isAutoScan && streamFps > 0 && (
+                        <span className="text-white font-mono ml-1">⚡ {streamFps} FPS</span>
+                      )}
+                      {isAutoScan && streamLatency > 0 && (
+                        <span className="text-blue-300 font-mono ml-1">({streamLatency}ms)</span>
+                      )}
+                    </div>
+                  </div>
+                )}
 
                 {!isCameraActive && !staticImage && (
                   <div className="camera-placeholder">
@@ -1267,7 +1763,7 @@ export default function CameraMonitor({ onNewAlert }) {
                         className={`btn ${isAutoScan ? 'btn-danger' : 'btn-outline'}`}
                         onClick={() => setIsAutoScan(!isAutoScan)}
                       >
-                        {isAutoScan ? 'Dừng Tự Động Quét' : 'Bật Tự Động Quét'}
+                        {isAutoScan ? 'Dừng Quét Liên Tục' : 'Bật Quét Liên Tục (~5 FPS)'}
                       </button>
                     </>
                   )}
@@ -1346,9 +1842,9 @@ export default function CameraMonitor({ onNewAlert }) {
 
           <div className="panel-body">
             {/* 1. Cấu hình ngưỡng tương đồng */}
-            <div className="form-group mb-4">
+            <div className="form-group mb-3">
               <div className="flex justify-between items-center mb-1">
-                <label className="form-label">Ngưỡng tương đồng (Threshold):</label>
+                <label className="form-label">Ngưỡng khuôn mặt:</label>
                 <span className="font-bold text-blue-400">{(threshold * 100).toFixed(0)}%</span>
               </div>
               <input
@@ -1364,6 +1860,27 @@ export default function CameraMonitor({ onNewAlert }) {
                 <span>30% (Nhạy)</span>
                 <span>45% (Chuẩn)</span>
                 <span>80% (Khắt khe)</span>
+              </div>
+            </div>
+
+            <div className="form-group mb-4">
+              <div className="flex justify-between items-center mb-1">
+                <label className="form-label">Ngưỡng trang phục:</label>
+                <span className="font-bold text-cyan-400">{(bodyThreshold * 100).toFixed(0)}%</span>
+              </div>
+              <input
+                type="range"
+                min="0.50"
+                max="0.90"
+                step="0.05"
+                value={bodyThreshold}
+                onChange={(e) => setBodyThreshold(parseFloat(e.target.value))}
+                className="slider-input"
+              />
+              <div className="flex justify-between text-xs text-muted">
+                <span>50% (Nhạy)</span>
+                <span>65% (Chuẩn)</span>
+                <span>90% (Khắt khe)</span>
               </div>
             </div>
 
@@ -1447,8 +1964,10 @@ export default function CameraMonitor({ onNewAlert }) {
                           <div className="stat-label">Khung hình quét</div>
                         </div>
                         <div className="stat-card">
-                          <div className="stat-value text-blue-400">{videoResult.totalFacesDetected}</div>
-                          <div className="stat-label">Mặt phát hiện</div>
+                          <div className="stat-value text-blue-400">
+                            {videoResult.totalDetections || videoResult.totalFacesDetected || 0}
+                          </div>
+                          <div className="stat-label">Lượt đối tượng</div>
                         </div>
                         <div className="stat-card">
                           <div className={`stat-value ${videoResult.matched ? 'text-red-400 font-bold' : 'text-gray-400'}`}>
@@ -1475,60 +1994,73 @@ export default function CameraMonitor({ onNewAlert }) {
                       {videoResult.uniquePersons && videoResult.uniquePersons.length > 0 && (
                         <div className="unique-persons-section mb-4">
                           <div className="breakdown-title mb-2">Người Thân Phát Hiện Được:</div>
-                          {videoResult.uniquePersons.map((p, pIdx) => (
-                            <div key={pIdx} className="matched-person-card mb-2">
-                              <img
-                                src={getFullImageUrl(p.person?.anhDaiDienUrl)}
-                                alt="Avatar"
-                                className="matched-avatar"
-                              />
-                              <div className="matched-details flex-1">
-                                <div className="flex justify-between items-start">
-                                  <div className="matched-name">{p.person?.hoTen}</div>
-                                  <span className="badge badge-red text-xs">
-                                    {(p.maxSimilarity * 100).toFixed(1)}%
-                                  </span>
-                                </div>
-                                <div className="matched-sub">Khu vực: {p.person?.khuVuc || 'N/A'}</div>
-                                <div className="matched-sub">Xuất hiện: {p.occurrencesCount} lần</div>
+                          {videoResult.uniquePersons.map((p, pIdx) => {
+                            const personProfile = p.hoSo || p.person;
+                            return (
+                              <div key={pIdx} className="matched-person-card mb-2">
+                                <img
+                                  src={getFullImageUrl(personProfile?.anhDaiDienUrl)}
+                                  alt="Avatar"
+                                  className="matched-avatar"
+                                />
+                                <div className="matched-details flex-1">
+                                  <div className="flex justify-between items-start">
+                                    <div className="matched-name">{personProfile?.hoTen}</div>
+                                    <div className="flex flex-col items-end gap-1">
+                                      <span className="badge badge-red text-xs">
+                                        Face: {(((p.maxFaceSimilarity || p.maxSimilarity || 0)) * 100).toFixed(1)}%
+                                      </span>
+                                      {p.maxBodySimilarity > 0 && (
+                                        <span className="badge badge-cyan text-xs">
+                                          Body: {((p.maxBodySimilarity) * 100).toFixed(1)}%
+                                        </span>
+                                      )}
+                                    </div>
+                                  </div>
+                                  <div className="matched-sub">Khu vực: {personProfile?.khuVuc || 'N/A'}</div>
+                                  <div className="matched-sub">Xuất hiện: {p.occurrencesCount} lần</div>
 
-                                {/* Mốc thời gian có thể bấm để tua video */}
-                                <div className="timestamps-chips mt-2">
-                                  <span className="text-[11px] text-muted mr-1">Tua tới giây:</span>
-                                  {p.timestamps?.map((ts, tsIdx) => {
-                                    const [m, s] = ts.split(':').map(Number);
-                                    const sec = (m || 0) * 60 + (s || 0);
-                                    const matchedEv = videoResult.timeline?.find(
-                                      (ev) => Math.abs(ev.timestamp - sec) <= 1.0
-                                    );
-                                    return (
-                                      <button
-                                        key={tsIdx}
-                                        type="button"
-                                        className="timestamp-chip"
-                                        onClick={() =>
-                                          jumpToTimestamp(
-                                            sec,
-                                            matchedEv || {
-                                              timestamp: sec,
-                                              timestampFormatted: ts,
-                                              similarity: p.maxSimilarity,
-                                              person: p.person,
-                                              bbox: [0, 0, 0, 0],
-                                            }
-                                          )
-                                        }
-                                        title={`Tua video tới ${ts}`}
-                                      >
-                                        <Clock size={10} />
-                                        <span>{ts}</span>
-                                      </button>
-                                    );
-                                  })}
+                                  {/* Mốc thời gian có thể bấm để tua video */}
+                                  <div className="timestamps-chips mt-2">
+                                    <span className="text-[11px] text-muted mr-1">Tua tới giây:</span>
+                                    {p.timestamps?.map((ts, tsIdx) => {
+                                      const [m, s] = ts.split(':').map(Number);
+                                      const sec = (m || 0) * 60 + (s || 0);
+                                      const matchedEv = videoResult.timeline?.find(
+                                        (ev) => Math.abs(ev.timestamp - sec) <= 1.0
+                                      );
+                                      return (
+                                        <button
+                                          key={tsIdx}
+                                          type="button"
+                                          className="timestamp-chip"
+                                          onClick={() =>
+                                            jumpToTimestamp(
+                                              sec,
+                                              matchedEv || {
+                                                timestamp: sec,
+                                                timestampFormatted: ts,
+                                                similarity: p.maxFaceSimilarity || p.maxSimilarity,
+                                                faceSimilarity: p.maxFaceSimilarity,
+                                                bodySimilarity: p.maxBodySimilarity,
+                                                person: personProfile,
+                                                hoSo: personProfile,
+                                                bbox: [0, 0, 0, 0],
+                                              }
+                                            )
+                                          }
+                                          title={`Tua video tới ${ts}`}
+                                        >
+                                          <Clock size={10} />
+                                          <span>{ts}</span>
+                                        </button>
+                                      );
+                                    })}
+                                  </div>
                                 </div>
                               </div>
-                            </div>
-                          ))}
+                            );
+                          })}
                         </div>
                       )}
 
@@ -1539,36 +2071,51 @@ export default function CameraMonitor({ onNewAlert }) {
                             Chi Tiết Từng Lượt Xuất Hiện ({videoResult.timeline.length}):
                           </div>
                           <div className="timeline-events-list">
-                            {videoResult.timeline.map((ev, evIdx) => (
-                              <div
-                                key={evIdx}
-                                className={`timeline-event-card ${selectedTimelineEvent === ev ? 'selected-event' : ''}`}
-                                onClick={() => jumpToTimestamp(ev.timestamp, ev)}
-                              >
-                                <div className="event-snapshot-thumb">
-                                  <img
-                                    src={ev.snapshotUrl ? getFullImageUrl(ev.snapshotUrl) : ev.snapshotBase64}
-                                    alt="Snapshot"
-                                  />
+                            {videoResult.timeline.map((ev, evIdx) => {
+                              const targetPerson = ev.hoSo || ev.person;
+                              return (
+                                <div
+                                  key={evIdx}
+                                  className={`timeline-event-card ${selectedTimelineEvent === ev ? 'selected-event' : ''}`}
+                                  onClick={() => jumpToTimestamp(ev.timestamp, ev)}
+                                >
+                                  <div className="event-snapshot-thumb">
+                                    <img
+                                      src={ev.snapshotUrl ? getFullImageUrl(ev.snapshotUrl) : ev.snapshotBase64}
+                                      alt="Snapshot"
+                                    />
+                                  </div>
+                                  <div className="event-info">
+                                    <div className="flex items-center justify-between">
+                                      <span className="event-timestamp">
+                                        ⏱️ {ev.timestampFormatted} ({ev.timestamp}s)
+                                      </span>
+                                      <div className="flex items-center gap-1.5">
+                                        <span className="event-sim font-bold text-red-400">
+                                          Face: {(((ev.faceSimilarity || ev.similarity || 0)) * 100).toFixed(0)}%
+                                        </span>
+                                        {ev.bodySimilarity > 0 && (
+                                          <span className="text-cyan-400 text-xs font-mono">
+                                            Body: {((ev.bodySimilarity) * 100).toFixed(0)}%
+                                          </span>
+                                        )}
+                                      </div>
+                                    </div>
+                                    <div className="event-name font-semibold text-white text-xs truncate">
+                                      {targetPerson?.hoTen || 'Người mất tích'}
+                                    </div>
+                                    {ev.bodyWarning && (
+                                      <div className="text-[10px] text-yellow-300 truncate">
+                                        ⚠️ Nghi vấn trang phục/dáng người
+                                      </div>
+                                    )}
+                                    <div className="text-[11px] text-blue-400 flex items-center gap-1 mt-1">
+                                      <Play size={10} /> Bấm để tua video tới mốc này
+                                    </div>
+                                  </div>
                                 </div>
-                                <div className="event-info">
-                                  <div className="flex items-center justify-between">
-                                    <span className="event-timestamp">
-                                      ⏱️ {ev.timestampFormatted} ({ev.timestamp}s)
-                                    </span>
-                                    <span className="event-sim font-bold text-red-400">
-                                      {(ev.similarity * 100).toFixed(1)}%
-                                    </span>
-                                  </div>
-                                  <div className="event-name font-semibold text-white text-xs truncate">
-                                    {ev.person?.hoTen || 'Người mất tích'}
-                                  </div>
-                                  <div className="text-[11px] text-blue-400 flex items-center gap-1 mt-1">
-                                    <Play size={10} /> Bấm để tua video tới mốc này
-                                  </div>
-                                </div>
-                              </div>
-                            ))}
+                              );
+                            })}
                           </div>
                         </div>
                       )}

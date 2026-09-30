@@ -80,10 +80,7 @@ export default function App() {
       <footer className="app-footer">
         <div className="max-w-6xl mx-auto">
           <p className="font-semibold text-gray-300">
-            Đồ Án: Hệ Thống Thông Báo Phát Hiện Người Mất Tích Bằng AI
-          </p>
-          <p className="mt-1 text-gray-500">
-            Kiến trúc Microservice: Python FastAPI (YOLOv8-Face + MobileFaceNet + FAISS) &bull; Java Spring Boot &bull; MySQL &bull; React.js (Vite)
+            Hệ Thống Phát Hiện Người Đang Được Tìm Kiếm Bằng AI
           </p>
         </div>
       </footer>

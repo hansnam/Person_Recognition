@@ -24,6 +24,18 @@ public class LogPhatHien {
     @Column(name = "do_tin_cay", nullable = false)
     private Float doTinCay;
 
+    @Column(name = "face_similarity")
+    private Float faceSimilarity;
+
+    @Column(name = "body_similarity")
+    private Float bodySimilarity;
+
+    @Column(name = "fusion_status", length = 30)
+    private String fusionStatus;
+
+    @Column(name = "body_warning")
+    private Boolean bodyWarning = false;
+
     @Column(name = "anh_chup_url", length = 500)
     private String anhChupUrl;
 
@@ -42,6 +54,9 @@ public class LogPhatHien {
     protected void onCreate() {
         if (this.thoiGian == null) {
             this.thoiGian = LocalDateTime.now();
+        }
+        if (this.bodyWarning == null) {
+            this.bodyWarning = false;
         }
     }
 
@@ -78,6 +93,38 @@ public class LogPhatHien {
         this.doTinCay = doTinCay;
     }
 
+    public Float getFaceSimilarity() {
+        return faceSimilarity;
+    }
+
+    public void setFaceSimilarity(Float faceSimilarity) {
+        this.faceSimilarity = faceSimilarity;
+    }
+
+    public Float getBodySimilarity() {
+        return bodySimilarity;
+    }
+
+    public void setBodySimilarity(Float bodySimilarity) {
+        this.bodySimilarity = bodySimilarity;
+    }
+
+    public String getFusionStatus() {
+        return fusionStatus;
+    }
+
+    public void setFusionStatus(String fusionStatus) {
+        this.fusionStatus = fusionStatus;
+    }
+
+    public Boolean getBodyWarning() {
+        return bodyWarning;
+    }
+
+    public void setBodyWarning(Boolean bodyWarning) {
+        this.bodyWarning = bodyWarning;
+    }
+
     public String getAnhChupUrl() {
         return anhChupUrl;
     }
@@ -86,3 +133,4 @@ public class LogPhatHien {
         this.anhChupUrl = anhChupUrl;
     }
 }
+
