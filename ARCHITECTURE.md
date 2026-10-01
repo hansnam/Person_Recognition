@@ -488,16 +488,14 @@ person_detection/
 
 ## 8. Các Điểm Nổi Bật Về Tối Ưu Hóa & Tính Ổn Định
 
-1. **Bảo toàn 100% Hệ thống Face Baseline (Zero Regression):**
-   - Mọi API cũ (`POST /api/detection/match`, `POST /api/detection/match-video`, `POST /ml/detect-and-match`) được giữ nguyên vẹn, đảm bảo tính liên tục của hệ thống ban đầu.
-2. **Nguyên tắc Ưu tiên Face (Face-Priority & Body-Assist):**
+1. **Nguyên tắc Ưu tiên Face (Face-Priority & Body-Assist):**
    - Loại bỏ cơ chế xung đột gây hủy nhận diện vô danh (`CONFLICT -> null`).
    - Khi Face khớp $P_1$ và Body khớp $P_2$, hệ thống **vẫn nhận dạng chính xác theo Face ($P_1$)**, kích hoạt thông báo nhận dạng và gắn kèm cờ nghi vấn trang phục (`body_warning = true`, status: `FACE_MATCH_BODY_MISMATCH`) để cảnh báo người giám sát.
-3. **Độc lập hai nguồn dữ liệu sinh trắc học:**
+2. **Độc lập hai nguồn dữ liệu sinh trắc học:**
    - Điểm `face_similarity` và `body_similarity` luôn được lưu trữ, truyền tải và hiển thị độc lập trong MySQL, DTOs và UI card. Tuyệt đối không lấy `Math.max()` hay hòa trộn hai không gian vector khác biệt.
-4. **Cô lập lỗi (Fault Isolation & Graceful Degradation):**
+3. **Cô lập lỗi (Fault Isolation & Graceful Degradation):**
    - Nếu mô hình Re-ID gặp sự cố hoặc hồ sơ chưa đăng ký ảnh toàn thân, pipeline Body trả về danh sách rỗng mà không gây gián đoạn pipeline Face. Hệ thống tự động chuyển tiếp sang trạng thái `FACE_CANDIDATE` với độ chính xác khuôn mặt nguyên vẹn.
-5. **Thực thi song song đa luồng (Parallel Multimodal Execution):**
+4. **Thực thi song song đa luồng (Parallel Multimodal Execution):**
    - FastAPI tận dụng `ThreadPoolExecutor(max_workers=2)` để chạy song song Face Detection và Body Detection. Tổng thời gian xử lý một khung hình chỉ bị giới hạn bởi pipeline lớn hơn (khoảng 300 – 450ms trên CPU tiêu chuẩn), duy trì luồng giám sát camera mượt mà.
-6. **Xử lý Bất đồng bộ Không nghẽn (Non-blocking Asynchronous Operations):**
+5. **Xử lý Bất đồng bộ Không nghẽn (Non-blocking Asynchronous Operations):**
    - Tác vụ gửi email cảnh báo người thân (`EmailService.sendMissingPersonAlert`) chạy trên luồng nền `@Async("mailTaskExecutor")`, không làm ảnh hưởng đến tốc độ khung hình (FPS) của trạm giám sát.

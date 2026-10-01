@@ -3,11 +3,11 @@
 
 ---
 
-## 📌 Tổng Quan Về Hệ Thống (System Overview)
+### Tổng Quan Về Hệ Thống (System Overview)
 
 Hệ thống **FINDME AI** là giải pháp giám sát và tìm kiếm người mất tích tự động, ứng dụng thị giác máy tính (Computer Vision) và học sâu (Deep Learning) kết hợp sinh trắc học đa phương thức (**Multimodal Biometrics: Face Recognition + Body Person Re-Identification**) theo thời gian thực nhằm hỗ trợ gia đình và lực lượng chức năng phát hiện người mất tích qua camera an ninh hoặc ảnh chụp hiện trường.
 
-### 🌟 Các Tính Năng Trọng Tâm:
+### Các Tính Năng Trọng Tâm:
 1. **Quản trị hồ sơ người mất tích:** Khai báo thông tin cá nhân, khu vực mất tích, thông tin liên hệ gia đình; tự động trích xuất và đồng bộ cả vector đặc trưng khuôn mặt (Face) và dáng người/trang phục (Body Re-ID) vào cơ sở dữ liệu vector FAISS.
 2. **Nhận diện đa phương thức thời gian thực (Multimodal Real-time Fusion):**
    - **Khuôn mặt (Face Recognition):** Phát hiện qua YOLOv8n-Face $\rightarrow$ Căn chỉnh 5 điểm mốc ArcFace (112×112) $\rightarrow$ Trích xuất vector 512 chiều bằng MobileFaceNet.
@@ -21,7 +21,7 @@ Hệ thống **FINDME AI** là giải pháp giám sát và tìm kiếm người 
 
 ---
 
-## 🏗️ Kiến Trúc Hệ Thống (System Architecture)
+### Kiến Trúc Hệ Thống (System Architecture)
 
 Hệ thống được thiết kế theo kiến trúc **Microservices** phân tán gồm 3 thành phần chính và cơ sở dữ liệu MySQL:
 
