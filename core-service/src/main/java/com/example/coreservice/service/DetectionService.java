@@ -343,18 +343,19 @@ public class DetectionService {
                     }
                 }
 
-                // Ghi log & gửi email khi nhận dạng thành công theo khuôn mặt (CONFIRMED, FACE_MATCH_BODY_MISMATCH, FACE_CANDIDATE)
+                // Ghi log & gửi email khi nhận dạng thành công (Face) hoặc nghi vấn trang phục (Body)
                 boolean isFaceMatch = "CONFIRMED".equals(status)
                         || "FACE_MATCH_BODY_MISMATCH".equals(status)
                         || "FACE_CANDIDATE".equals(status);
+                boolean isBodyCandidate = "BODY_CANDIDATE".equals(status);
 
-                if (isFaceMatch && matchedPerson != null) {
+                if ((isFaceMatch || isBodyCandidate) && matchedPerson != null) {
                     matchedCount++;
                     if (firstMatchedName == null) {
                         firstMatchedName = matchedPerson.getHoTen();
                     }
 
-                    // Lưu file ảnh chụp vào thư mục uploads khi có người thân trùng khớp
+                    // Lưu file ảnh chụp vào thư mục uploads khi có người thân trùng khớp hoặc nghi vấn trang phục
                     if (capturedImageUrl == null) {
                         capturedImageUrl = fileStorageService.storeFile(file);
                     }
@@ -375,7 +376,7 @@ public class DetectionService {
 
                     LogPhatHien savedLog = logPhatHienRepository.save(log);
 
-                    // Kích hoạt alert email khi CONFIRMED hoặc FACE_MATCH_BODY_MISMATCH
+                    // Kích hoạt alert email khi CONFIRMED hoặc FACE_MATCH_BODY_MISMATCH (không gửi spam khi chỉ mới nghi vấn trang phục BODY_CANDIDATE)
                     if ("CONFIRMED".equals(status) || "FACE_MATCH_BODY_MISMATCH".equals(status)) {
                         emailService.sendMissingPersonAlert(
                                 matchedPerson.getLienHeNguoiThan(),
@@ -476,13 +477,14 @@ public class DetectionService {
                         personCache.put(pSum.getPersonId(), nmt);
                         sDto.setHoSo(NguoiMatTichResponse.fromEntity(nmt));
 
-                        // Lưu log_phat_hien khi face khớp (CONFIRMED, FACE_MATCH_BODY_MISMATCH, FACE_CANDIDATE)
+                        // Lưu log_phat_hien khi khớp (Face) hoặc nghi vấn trang phục (Body)
                         String status = pSum.getFusionStatus();
                         boolean isFaceMatch = "CONFIRMED".equals(status)
                                 || "FACE_MATCH_BODY_MISMATCH".equals(status)
                                 || "FACE_CANDIDATE".equals(status);
+                        boolean isBodyCandidate = "BODY_CANDIDATE".equals(status);
 
-                        if (isFaceMatch) {
+                        if (isFaceMatch || isBodyCandidate) {
                             LogPhatHien log = new LogPhatHien();
                             log.setNguoiMatTich(nmt);
                             log.setThoiGian(LocalDateTime.now());

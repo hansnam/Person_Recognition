@@ -481,6 +481,12 @@
   background: linear-gradient(135deg, rgba(30, 15, 5, 0.95), rgba(40, 20, 10, 0.95)) !important;
 }
 
+.banner-warning-body {
+  border-color: rgba(234, 88, 12, 0.75) !important;
+  background: linear-gradient(135deg, rgba(45, 20, 10, 0.96), rgba(30, 12, 5, 0.96)) !important;
+  box-shadow: 0 0 25px rgba(234, 88, 12, 0.35) !important;
+}
+
 .face-sim-value {
   font-size: 12px;
   font-weight: 600;

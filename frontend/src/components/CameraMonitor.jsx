@@ -54,6 +54,17 @@ export default function CameraMonitor({ onNewAlert }) {
   const [stream, setStream] = useState(null);
   const [threshold, setThreshold] = useState(0.45);
   const [bodyThreshold, setBodyThreshold] = useState(0.65);
+  const thresholdRef = useRef(0.45);
+  const bodyThresholdRef = useRef(0.65);
+
+  // Luôn đồng bộ ref với state để vòng lặp quét camera không bị Stale Closure
+  useEffect(() => {
+    thresholdRef.current = threshold;
+  }, [threshold]);
+
+  useEffect(() => {
+    bodyThresholdRef.current = bodyThreshold;
+  }, [bodyThreshold]);
   const [lastResult, setLastResult] = useState(null);
   const [alertData, setAlertData] = useState(null);
   const [errorMessage, setErrorMessage] = useState('');
@@ -271,7 +282,9 @@ export default function CameraMonitor({ onNewAlert }) {
     const startTime = performance.now();
 
     try {
-      const result = await detectFusion(blob, threshold, bodyThreshold);
+      const activeFaceThresh = thresholdRef.current !== undefined ? thresholdRef.current : threshold;
+      const activeBodyThresh = bodyThresholdRef.current !== undefined ? bodyThresholdRef.current : bodyThreshold;
+      const result = await detectFusion(blob, activeFaceThresh, activeBodyThresh);
       const latency = Math.round(performance.now() - startTime);
       setStreamLatency(latency);
 
@@ -291,12 +304,13 @@ export default function CameraMonitor({ onNewAlert }) {
       // Vẽ bounding box (với scale tỉ lệ tọa độ để khớp chuẩn màn hình)
       drawBoundingBox(result, imgWidth, imgHeight, imgElement || staticImageRef.current, scaleRatioX, scaleRatioY);
 
-      // Nếu phát hiện trùng khớp người thân (ưu tiên Face Recognition)
+      // Nếu phát hiện trùng khớp người thân (Face) hoặc nghi vấn trang phục (Body)
       const firstMatch = result.detections?.find(
         (d) =>
           (d.fusion?.status === 'CONFIRMED' ||
             d.fusion?.status === 'FACE_MATCH_BODY_MISMATCH' ||
-            d.fusion?.status === 'FACE_CANDIDATE') &&
+            d.fusion?.status === 'FACE_CANDIDATE' ||
+            d.fusion?.status === 'BODY_CANDIDATE') &&
           d.hoSo
       );
 
@@ -458,7 +472,7 @@ export default function CameraMonitor({ onNewAlert }) {
           if (det.body) {
             const bodySimPercent = ((det.body.similarity || 0) * 100).toFixed(0);
             const bodyLabel = det.body.matched
-              ? `Thân hình P#${det.hoSo?.hoTen || det.body.personId}: ${bodySimPercent}%`
+              ? `Thân hình: ${det.hoSo?.hoTen || ('P#' + det.body.personId)} (${bodySimPercent}%)`
               : `Thân hình: ${bodySimPercent}%`;
             ctx.font = `${Math.max(11, fontSize - 2)}px Inter, sans-serif`;
             const bWidth = ctx.measureText(bodyLabel).width;
@@ -469,7 +483,7 @@ export default function CameraMonitor({ onNewAlert }) {
           }
         }
 
-        // Vẽ Face Bounding Box (Inner, Dashed, Red)
+        // Vẽ Face Bounding Box (Inner: Màu nhạt nếu bình thường, Đỏ rực nếu phát hiện khớp)
         let fx1, fy1, fx2, fy2, fw, fh;
         if (det.face?.bbox && det.face.bbox.length >= 4) {
           fx1 = det.face.bbox[0] * scaleRatioX;
@@ -479,22 +493,47 @@ export default function CameraMonitor({ onNewAlert }) {
           fw = fx2 - fx1;
           fh = fy2 - fy1;
 
-          ctx.strokeStyle = '#fa0303ff';
-          ctx.lineWidth = Math.max(2, lineWidth - 1);
-          ctx.setLineDash([5, 4]); // Nét đứt
+          const isFaceMatched = Boolean(det.face.matched);
+          const faceSimPercent = ((det.face.similarity || 0) * 100).toFixed(0);
+
+          // Cấu hình màu sắc: Bình thường (nhạt) vs Phát hiện (đỏ)
+          const faceStrokeColor = isFaceMatched ? '#ef4444' : 'rgba(56, 189, 248, 0.7)';
+          const faceBadgeBg = isFaceMatched ? 'rgba(220, 38, 38, 0.92)' : 'rgba(15, 23, 42, 0.78)';
+          const faceTextColor = isFaceMatched ? '#ffffff' : '#38bdf8';
+          const faceLineWidth = isFaceMatched ? Math.max(2, lineWidth) : Math.max(1.5, lineWidth - 1.5);
+
+          // Phủ màu nền mờ nếu phát hiện khớp
+          if (isFaceMatched) {
+            ctx.fillStyle = 'rgba(239, 68, 68, 0.12)';
+            ctx.fillRect(fx1, fy1, fw, fh);
+          }
+
+          // Vẽ viền mặt nét đứt
+          ctx.strokeStyle = faceStrokeColor;
+          ctx.lineWidth = faceLineWidth;
+          ctx.setLineDash(isFaceMatched ? [6, 4] : [4, 4]); // Nét đứt
           ctx.strokeRect(fx1, fy1, fw, fh);
           ctx.setLineDash([]); // Reset nét liền
 
-          const faceSimPercent = ((det.face.similarity || 0) * 100).toFixed(0);
-          const faceLabel = det.face.matched
+          // Nhãn khuôn mặt
+          const faceLabel = isFaceMatched
             ? `${det.hoSo?.hoTen || 'Người thân'}: ${faceSimPercent}%`
             : `Mặt: ${faceSimPercent}%`;
-          ctx.font = `bold ${Math.max(11, fontSize - 2)}px Inter, sans-serif`;
+
+          ctx.font = `${isFaceMatched ? 'bold ' : ''}${Math.max(11, fontSize - 2)}px Inter, sans-serif`;
           const fWidth = ctx.measureText(faceLabel).width;
           const fLabelY = Math.max(0, fy1 - (fontSize + pad));
-          ctx.fillStyle = 'rgba(233, 14, 25, 0.9)';
+
+          ctx.fillStyle = faceBadgeBg;
           ctx.fillRect(fx1, fLabelY, fWidth + pad * 2, fontSize + pad);
-          ctx.fillStyle = '#ffffff';
+
+          if (isFaceMatched) {
+            ctx.strokeStyle = '#ef4444';
+            ctx.lineWidth = 1;
+            ctx.strokeRect(fx1, fLabelY, fWidth + pad * 2, fontSize + pad);
+          }
+
+          ctx.fillStyle = faceTextColor;
           ctx.fillText(faceLabel, fx1 + pad, fLabelY + fontSize - 2);
         }
 
@@ -510,7 +549,7 @@ export default function CameraMonitor({ onNewAlert }) {
           } else if (status === 'FACE_CANDIDATE') {
             mainLabel = `👤 KHỚP MẶT: ${det.hoSo?.hoTen || 'Người thân'}`;
           } else if (status === 'BODY_CANDIDATE') {
-            mainLabel = `🚶 NGHI VẤN TRANG PHỤC (P#${det.body?.personId || '?'})`;
+            mainLabel = `🚶 NGHI VẤN TRANG PHỤC: ${det.hoSo?.hoTen || ('P#' + (det.body?.personId || '?'))}`;
           } else {
             mainLabel = `✓ Chưa khớp (#${index + 1})`;
           }
@@ -794,18 +833,21 @@ export default function CameraMonitor({ onNewAlert }) {
         }
 
         try {
-          const result = await detectFusion(blob, threshold, bodyThreshold);
+          const activeFaceThresh = thresholdRef.current !== undefined ? thresholdRef.current : threshold;
+          const activeBodyThresh = bodyThresholdRef.current !== undefined ? bodyThresholdRef.current : bodyThreshold;
+          const result = await detectFusion(blob, activeFaceThresh, activeBodyThresh);
           setLastResult(result);
 
           // Vẽ khung nhận diện lên canvas phủ trên video
           drawVideoBoundingBox(result, video.videoWidth, video.videoHeight);
 
-          // Ưu tiên Face Recognition
+          // Phát hiện trùng khớp người thân (Face) hoặc nghi vấn trang phục (Body)
           const firstMatch = result.detections?.find(
             (d) =>
               (d.fusion?.status === 'CONFIRMED' ||
                 d.fusion?.status === 'FACE_MATCH_BODY_MISMATCH' ||
-                d.fusion?.status === 'FACE_CANDIDATE') &&
+                d.fusion?.status === 'FACE_CANDIDATE' ||
+                d.fusion?.status === 'BODY_CANDIDATE') &&
               d.hoSo
           );
 
@@ -1310,11 +1352,20 @@ export default function CameraMonitor({ onNewAlert }) {
 
       {/* Cảnh báo khẩn cấp dạng Banner khi phát hiện */}
       {alertData && (
-        <div className={`emergency-banner alert-pulse ${alertData.status === 'FACE_MATCH_BODY_MISMATCH' ? 'banner-warning-mismatch' : ''}`}>
+        <div className={`emergency-banner alert-pulse ${alertData.status === 'FACE_MATCH_BODY_MISMATCH'
+          ? 'banner-warning-mismatch'
+          : alertData.status === 'BODY_CANDIDATE'
+            ? 'banner-warning-body'
+            : ''
+          }`}>
           <div className="emergency-header">
             <div className="flex items-center gap-3">
               <span className="emergency-icon">
-                {alertData.status === 'FACE_MATCH_BODY_MISMATCH' ? '⚠️' : '🚨'}
+                {alertData.status === 'CONFIRMED'
+                  ? '🚨'
+                  : alertData.status === 'BODY_CANDIDATE'
+                    ? '🚶'
+                    : '⚠️'}
               </span>
               <div>
                 <h3 className="emergency-title">
@@ -1322,14 +1373,24 @@ export default function CameraMonitor({ onNewAlert }) {
                     ? 'XÁC NHẬN: TRÙNG KHỚP CẢ KHUÔN MẶT VÀ TRANG PHỤC!'
                     : alertData.status === 'FACE_MATCH_BODY_MISMATCH'
                       ? 'NHẬN DẠNG THEO KHUÔN MẶT — CẢNH BÁO NGHI VẤN THÂN HÌNH!'
-                      : 'PHÁT HIỆN TRÙNG KHỚP KHUÔN MẶT NGƯỜI THÂN!'}
+                      : alertData.status === 'BODY_CANDIDATE'
+                        ? '⚠️ CẢNH BÁO NGHI VẤN: PHÁT HIỆN KHỚP TRANG PHỤC / DÁNG NGƯỜI!'
+                        : 'PHÁT HIỆN TRÙNG KHỚP KHUÔN MẶT NGƯỜI THÂN!'}
                 </h3>
                 <p className="emergency-subtitle">
-                  Hệ thống FINDME AI vừa nhận diện chính xác <strong>{alertData.hoSo?.hoTen}</strong>
-                  {alertData.bodyWarning && (
-                    <span className="ml-2 text-yellow-300 font-semibold">
-                      (⚠️ Lưu ý: Dáng người/trang phục có điểm nghi vấn)
-                    </span>
+                  {alertData.status === 'BODY_CANDIDATE' ? (
+                    <>
+                      Hệ thống phát hiện đối tượng nghi vấn có trang phục/dáng người trùng khớp với hồ sơ <strong>{alertData.hoSo?.hoTen || 'Người thân'}</strong>
+                    </>
+                  ) : (
+                    <>
+                      Hệ thống FINDME AI vừa nhận diện chính xác <strong>{alertData.hoSo?.hoTen}</strong>
+                      {alertData.bodyWarning && (
+                        <span className="ml-2 text-yellow-300 font-semibold">
+                          (⚠️ Lưu ý: Dáng người/trang phục có điểm nghi vấn)
+                        </span>
+                      )}
+                    </>
                   )}
                 </p>
               </div>
@@ -1351,12 +1412,21 @@ export default function CameraMonitor({ onNewAlert }) {
               </div>
               <div className="comparison-divider">
                 <div className="match-score">
-                  {((alertData.faceSimilarity || alertData.similarity || 0) * 100).toFixed(1)}%
+                  {alertData.status === 'BODY_CANDIDATE'
+                    ? `${((alertData.bodySimilarity || 0) * 100).toFixed(1)}%`
+                    : `${((alertData.faceSimilarity || alertData.similarity || 0) * 100).toFixed(1)}%`}
                 </div>
-                <span className="match-text text-lg font-bold">Độ tương đồng Khuôn Mặt</span>
-                {alertData.bodySimilarity > 0 && (
+                <span className="match-text text-lg font-bold">
+                  {alertData.status === 'BODY_CANDIDATE' ? 'Độ tương đồng Trang Phục' : 'Độ tương đồng Khuôn Mặt'}
+                </span>
+                {alertData.status !== 'BODY_CANDIDATE' && alertData.bodySimilarity > 0 && (
                   <div className={`text-xs font-mono mt-1 ${alertData.bodyWarning ? 'text-amber-300' : 'text-cyan-300'}`}>
                     Trang phục: {((alertData.bodySimilarity) * 100).toFixed(1)}% {alertData.bodyWarning ? '(Nghi vấn)' : '(Khớp)'}
+                  </div>
+                )}
+                {alertData.status === 'BODY_CANDIDATE' && (
+                  <div className="text-xs font-mono mt-1 text-amber-300">
+                    Khuôn mặt: Chưa đối soát được (đang quay lưng hoặc che mặt)
                   </div>
                 )}
               </div>
@@ -1376,9 +1446,15 @@ export default function CameraMonitor({ onNewAlert }) {
               </div>
             )}
 
+            {/* {alertData.status === 'BODY_CANDIDATE' && (
+              <div className="p-3 my-2 bg-orange-950/70 border border-orange-500/50 rounded-lg text-orange-200 text-sm">
+                🚶 Đối tượng có độ tương đồng trang phục/dáng người ({((alertData.bodySimilarity || 0) * 100).toFixed(1)}%) với hồ sơ <strong>{alertData.hoSo?.hoTen}</strong>.
+              </div>
+            )} */}
+
             <div className="emergency-meta">
               <div>📍 <strong>Khu vực mất tích:</strong> {alertData.hoSo?.khuVuc || 'Chưa rõ'}</div>
-              <div>✉️ <strong>Email cảnh báo:</strong> {alertData.hoSo?.lienHeNguoiThan} (Đã gửi email thông báo tự động)</div>
+              <div>✉️ <strong>Đã gửi thông báo tới:</strong> {alertData.hoSo?.lienHeNguoiThan}</div>
             </div>
           </div>
         </div>
@@ -1853,7 +1929,11 @@ export default function CameraMonitor({ onNewAlert }) {
                 max="0.80"
                 step="0.05"
                 value={threshold}
-                onChange={(e) => setThreshold(parseFloat(e.target.value))}
+                onChange={(e) => {
+                  const val = parseFloat(e.target.value);
+                  setThreshold(val);
+                  thresholdRef.current = val;
+                }}
                 className="slider-input"
               />
               <div className="flex justify-between text-xs text-muted">
@@ -1874,7 +1954,11 @@ export default function CameraMonitor({ onNewAlert }) {
                 max="0.90"
                 step="0.05"
                 value={bodyThreshold}
-                onChange={(e) => setBodyThreshold(parseFloat(e.target.value))}
+                onChange={(e) => {
+                  const val = parseFloat(e.target.value);
+                  setBodyThreshold(val);
+                  bodyThresholdRef.current = val;
+                }}
                 className="slider-input"
               />
               <div className="flex justify-between text-xs text-muted">
