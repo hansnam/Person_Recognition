@@ -30,6 +30,8 @@ from app.reid.service import run_body_pipeline, get_body_detector
 from app.reid.embedder import get_body_embedder
 from app.reid.vector_store_body import body_vector_store
 from app.fusion import associate_face_body, fuse_results
+from app.skeleton.router import router as skeleton_router
+from app.skeleton.skeleton_detector import get_skeleton_detector
 
 app = FastAPI(
     title="Missing Persons ML Service",
@@ -45,6 +47,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Đăng ký Router Skeleton (độc lập, không ảnh hưởng logic cũ)
+app.include_router(skeleton_router)
 
 
 def read_image_from_upload(upload_file: UploadFile) -> np.ndarray:
@@ -496,6 +501,7 @@ async def detect_and_match_fusion(
 
     face_results = []
     body_results = []
+    skeleton_results = []
 
     def _exec_face():
         try:
@@ -511,13 +517,22 @@ async def detect_and_match_fusion(
             print(f"[Fusion Endpoint] Lỗi Body pipeline: {e}")
             return []
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+    def _exec_skeleton():
+        try:
+            return get_skeleton_detector().detect_skeletons(image, conf_threshold=0.35)
+        except Exception as e:
+            print(f"[Fusion Endpoint] Lỗi Skeleton pipeline: {e}")
+            return []
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
         f_future = executor.submit(_exec_face)
         b_future = executor.submit(_exec_body)
+        s_future = executor.submit(_exec_skeleton)
         face_results = f_future.result()
         body_results = b_future.result()
+        skeleton_results = s_future.result()
 
-    detections = associate_face_body(face_results, body_results)
+    detections = associate_face_body(face_results, body_results, skeleton_results)
     elapsed_ms = int((time.time() - start_time) * 1000)
 
     matched = any(

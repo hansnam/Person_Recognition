@@ -537,6 +537,49 @@ export default function CameraMonitor({ onNewAlert }) {
           ctx.fillText(faceLabel, fx1 + pad, fLabelY + fontSize - 2);
         }
 
+        // Vẽ Khung Xương (Skeleton Keypoints & Edges) - Tích hợp mặc định
+        if (det.skeleton?.keypoints && Array.isArray(det.skeleton.keypoints)) {
+          const kpts = det.skeleton.keypoints;
+          const kptMinConf = 0.35;
+          const skeletonEdges = [
+            [15, 13], [13, 11], [16, 14], [14, 12], [11, 12], // Thân dưới & hông
+            [5, 11], [6, 12], [5, 6],                         // Thân trên & vai
+            [5, 7], [7, 9], [6, 8], [8, 10],                  // Cánh tay
+            [1, 2], [0, 1], [0, 2], [1, 3], [2, 4], [3, 5], [4, 6] // Vùng đầu & mặt
+          ];
+
+          ctx.save();
+          // Vẽ các cạnh nối khung xương
+          ctx.lineWidth = Math.max(2, lineWidth);
+          ctx.strokeStyle = status === 'CONFIRMED' ? '#22c55e' : (status === 'FACE_MATCH_BODY_MISMATCH' ? '#f59e0b' : '#06b6d4');
+          skeletonEdges.forEach(([p1, p2]) => {
+            const kp1 = kpts[p1];
+            const kp2 = kpts[p2];
+            if (kp1 && kp2 && (kp1.conf || 1) >= kptMinConf && (kp2.conf || 1) >= kptMinConf) {
+              ctx.beginPath();
+              ctx.moveTo(kp1.x * scaleRatioX, kp1.y * scaleRatioY);
+              ctx.lineTo(kp2.x * scaleRatioX, kp2.y * scaleRatioY);
+              ctx.stroke();
+            }
+          });
+
+          // Vẽ các khớp nối (Joints)
+          kpts.forEach((kp) => {
+            if (kp && (kp.conf || 1) >= kptMinConf) {
+              const jx = kp.x * scaleRatioX;
+              const jy = kp.y * scaleRatioY;
+              ctx.beginPath();
+              ctx.arc(jx, jy, Math.max(3, lineWidth + 1), 0, 2 * Math.PI);
+              ctx.fillStyle = '#ef4444';
+              ctx.fill();
+              ctx.strokeStyle = '#ffffff';
+              ctx.lineWidth = 1.5;
+              ctx.stroke();
+            }
+          });
+          ctx.restore();
+        }
+
         // Top Header Badge trên Body Box (hoặc Face Box nếu không thấy Body)
         const anchorBox = (rawBodyBox && rawBodyBox.length >= 4) ? [bx1, by1, bx2, by2] : (det.face?.bbox ? [fx1, fy1, fx2, fy2] : null);
         if (anchorBox && anchorBox.length >= 4) {

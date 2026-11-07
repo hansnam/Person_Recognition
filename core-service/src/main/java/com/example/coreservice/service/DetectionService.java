@@ -314,6 +314,10 @@ public class DetectionService {
                     ));
                 }
 
+                if (item.getSkeleton() != null) {
+                    dto.setSkeleton(item.getSkeleton());
+                }
+
                 String status = "UNKNOWN";
                 Long fusionPersonId = null;
                 Boolean bodyWarning = false;

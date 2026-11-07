@@ -11,9 +11,18 @@ public class MlFusionDetectionItem {
     private List<Integer> bbox;
     private MlFusionComponentResult face;
     private MlFusionComponentResult body;
+    private SkeletonDto skeleton;
     private MlFusionResult fusion;
 
     public MlFusionDetectionItem() {
+    }
+
+    public SkeletonDto getSkeleton() {
+        return skeleton;
+    }
+
+    public void setSkeleton(SkeletonDto skeleton) {
+        this.skeleton = skeleton;
     }
 
     public Integer getDetectionId() {

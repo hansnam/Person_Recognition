@@ -8,10 +8,19 @@ public class FusionDetectionItemDto {
     private List<Integer> bbox;
     private FusionComponentResultDto face;
     private FusionComponentResultDto body;
+    private SkeletonDto skeleton;
     private FusionStatusDto fusion;
     private NguoiMatTichResponse hoSo;
 
     public FusionDetectionItemDto() {
+    }
+
+    public SkeletonDto getSkeleton() {
+        return skeleton;
+    }
+
+    public void setSkeleton(SkeletonDto skeleton) {
+        this.skeleton = skeleton;
     }
 
     public Integer getDetectionId() {

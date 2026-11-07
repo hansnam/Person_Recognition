@@ -7,6 +7,7 @@ Fusion Module: Kết hợp kết quả giữa Face Recognition và Body Person R
 
 import math
 from typing import List, Dict, Any, Optional
+from app.skeleton.feature_extractor import analyze_skeleton_features
 
 
 def is_face_inside_body(face_bbox: List[int], body_bbox: List[int], margin_ratio: float = 0.1) -> bool:
@@ -106,17 +107,40 @@ def fuse_results(
 
 def associate_face_body(
     face_results: List[Dict[str, Any]],
-    body_results: List[Dict[str, Any]]
+    body_results: List[Dict[str, Any]],
+    skeleton_results: Optional[List[Dict[str, Any]]] = None
 ) -> List[Dict[str, Any]]:
     """
-    Ghép đôi Face và Body trong một khung hình:
+    Ghép đôi Face, Body và Skeleton trong một khung hình:
     - Nếu Face nằm trong Body: Ghép lại thành 1 detection với outer bbox = body bbox
+    - Tự động gắn kết khung xương (Skeleton) tương ứng nếu có
     - Nếu Face không nằm trong Body nào: Detection chỉ có face (face-only)
     - Nếu Body không chứa Face nào: Detection chỉ có body (body-only)
     """
     detections = []
     used_body_indices = set()
+    used_skeleton_indices = set()
     detection_id_counter = 0
+
+    def find_best_skeleton(target_bbox: List[int]) -> Optional[Dict[str, Any]]:
+        nonlocal used_skeleton_indices
+        if not skeleton_results:
+            return None
+        best_idx = None
+        min_d = float("inf")
+        for s_idx, sk in enumerate(skeleton_results):
+            if s_idx in used_skeleton_indices:
+                continue
+            s_bbox = sk["bbox"]
+            dist = center_distance(target_bbox, s_bbox)
+            # Nếu 2 bbox gần nhau hoặc bao trùm nhau
+            if dist < min_d:
+                min_d = dist
+                best_idx = s_idx
+        if best_idx is not None and min_d < max(target_bbox[2] - target_bbox[0], target_bbox[3] - target_bbox[1]) * 1.5:
+            used_skeleton_indices.add(best_idx)
+            return skeleton_results[best_idx]
+        return None
 
     # Ghép face với body phù hợp nhất
     for face in face_results:
@@ -162,22 +186,37 @@ def associate_face_body(
             }
 
             fusion_info = fuse_results(f_matched, f_pid, b_matched, b_pid)
+            sk_obj = find_best_skeleton(matched_body["bbox"])
+            sk_kpts = sk_obj.get("keypoints", []) if sk_obj else []
+            sk_analysis = analyze_skeleton_features(sk_kpts) if sk_kpts else None
 
             detections.append({
                 "detection_id": detection_id_counter,
                 "bbox": matched_body["bbox"],  # outer bbox là body bbox
                 "face": face_info,
                 "body": body_info,
+                "skeleton": {
+                    "keypoints": sk_kpts,
+                    "analysis": sk_analysis
+                } if sk_kpts else None,
                 "fusion": fusion_info
             })
         else:
             # Face đứng đơn lẻ (không detect được body)
             fusion_info = fuse_results(f_matched, f_pid, False, None)
+            sk_obj = find_best_skeleton(f_bbox)
+            sk_kpts = sk_obj.get("keypoints", []) if sk_obj else []
+            sk_analysis = analyze_skeleton_features(sk_kpts) if sk_kpts else None
+
             detections.append({
                 "detection_id": detection_id_counter,
                 "bbox": f_bbox,
                 "face": face_info,
                 "body": None,
+                "skeleton": {
+                    "keypoints": sk_kpts,
+                    "analysis": sk_analysis
+                } if sk_kpts else None,
                 "fusion": fusion_info
             })
 
@@ -198,12 +237,19 @@ def associate_face_body(
             }
 
             fusion_info = fuse_results(False, None, b_matched, b_pid)
+            sk_obj = find_best_skeleton(body["bbox"])
+            sk_kpts = sk_obj.get("keypoints", []) if sk_obj else []
+            sk_analysis = analyze_skeleton_features(sk_kpts) if sk_kpts else None
 
             detections.append({
                 "detection_id": detection_id_counter,
                 "bbox": body["bbox"],
                 "face": None,
                 "body": body_info,
+                "skeleton": {
+                    "keypoints": sk_kpts,
+                    "analysis": sk_analysis
+                } if sk_kpts else None,
                 "fusion": fusion_info
             })
             detection_id_counter += 1
