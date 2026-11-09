@@ -31,3 +31,4 @@ public class SkeletonDto {
         this.analysis = analysis;
     }
 }
+

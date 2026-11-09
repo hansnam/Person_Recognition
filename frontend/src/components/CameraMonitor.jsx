@@ -549,9 +549,24 @@ export default function CameraMonitor({ onNewAlert }) {
           ];
 
           ctx.save();
+          // Cấu hình màu sắc theo trạng thái
+          let edgeColor = '#ffffff'; // Mặc định không khớp: Đường nối xương màu trắng
+          let jointColor = '#22c55e'; // Mặc định không khớp: Khớp tròn màu xanh lá
+          let jointBorderColor = '#ffffff';
+
+          if (status === 'CONFIRMED') {
+            edgeColor = '#ef4444'; // Trùng khớp (CONFIRMED): Đường nối xương màu đỏ
+            jointColor = '#ef4444'; // Khớp tròn màu đỏ viền trắng
+            jointBorderColor = '#ffffff';
+          } else if (status === 'FACE_MATCH_BODY_MISMATCH') {
+            edgeColor = '#f87171'; // Nghi vấn đổi trang phục: Màu đỏ nhẹ (light red)
+            jointColor = '#ef4444'; // Khớp tròn màu đỏ viền trắng
+            jointBorderColor = '#ffffff';
+          }
+
           // Vẽ các cạnh nối khung xương
           ctx.lineWidth = Math.max(2, lineWidth);
-          ctx.strokeStyle = status === 'CONFIRMED' ? '#22c55e' : (status === 'FACE_MATCH_BODY_MISMATCH' ? '#f59e0b' : '#06b6d4');
+          ctx.strokeStyle = edgeColor;
           skeletonEdges.forEach(([p1, p2]) => {
             const kp1 = kpts[p1];
             const kp2 = kpts[p2];
@@ -570,9 +585,9 @@ export default function CameraMonitor({ onNewAlert }) {
               const jy = kp.y * scaleRatioY;
               ctx.beginPath();
               ctx.arc(jx, jy, Math.max(3, lineWidth + 1), 0, 2 * Math.PI);
-              ctx.fillStyle = '#ef4444';
+              ctx.fillStyle = jointColor;
               ctx.fill();
-              ctx.strokeStyle = '#ffffff';
+              ctx.strokeStyle = jointBorderColor;
               ctx.lineWidth = 1.5;
               ctx.stroke();
             }
@@ -1988,7 +2003,7 @@ export default function CameraMonitor({ onNewAlert }) {
 
             <div className="form-group mb-4">
               <div className="flex justify-between items-center mb-1">
-                <label className="form-label">Ngưỡng trang phục:</label>
+                <label className="form-label">Ngưỡng trang phục/ dáng người:</label>
                 <span className="font-bold text-cyan-400">{(bodyThreshold * 100).toFixed(0)}%</span>
               </div>
               <input

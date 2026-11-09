@@ -53,3 +53,4 @@ public class SkeletonAnalysisDto {
         this.anthropometricRatios = anthropometricRatios;
     }
 }
+

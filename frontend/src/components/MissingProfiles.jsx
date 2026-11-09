@@ -225,7 +225,7 @@ export default function MissingProfiles({ user, onRequireLogin }) {
                     onClick={() => handleOpenBodyModal(p)}
                     title="Đăng ký thêm ảnh toàn thân để nhận diện Re-ID dáng người"
                   >
-                    <UserCheck size={14} /> Thêm ảnh Body
+                    <UserCheck size={14} /> Thêm ảnh
                   </button>
                   <button
                     className="btn btn-danger btn-sm"

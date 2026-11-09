@@ -59,3 +59,4 @@ public class KeypointDto {
         this.conf = conf;
     }
 }
+
