@@ -603,11 +603,11 @@ export default function CameraMonitor({ onNewAlert }) {
           if (status === 'CONFIRMED') {
             mainLabel = `🚨 XÁC NHẬN: ${det.hoSo?.hoTen || 'Người thân'}`;
           } else if (status === 'FACE_MATCH_BODY_MISMATCH') {
-            mainLabel = `⚠️ MẶT KHỚP (NGHI VẤN BODY): ${det.hoSo?.hoTen || 'Người thân'}`;
+            mainLabel = `⚠️ MẶT KHỚP (NGHI VẤN DÁNG NGƯỜI): ${det.hoSo?.hoTen || 'Người thân'}`;
           } else if (status === 'FACE_CANDIDATE') {
-            mainLabel = `👤 KHỚP MẶT: ${det.hoSo?.hoTen || 'Người thân'}`;
+            mainLabel = `👤 PHÁT HIỆN: ${det.hoSo?.hoTen || 'Người thân'}`;
           } else if (status === 'BODY_CANDIDATE') {
-            mainLabel = `🚶 NGHI VẤN TRANG PHỤC: ${det.hoSo?.hoTen || ('P#' + (det.body?.personId || '?'))}`;
+            mainLabel = `🚶 NGHI VẤN TRANG PHỤC/ DÁNG NGƯỜI: ${det.hoSo?.hoTen || ('P#' + (det.body?.personId || '?'))}`;
           } else {
             mainLabel = `✓ Chưa khớp (#${index + 1})`;
           }
